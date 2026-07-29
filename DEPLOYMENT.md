@@ -5,13 +5,12 @@ This repository is a security-focused FileRise fork for one-way uploads to the N
 ## Network boundary
 
 - `drop.phaise.com` routes only to `public-gateway`. The gateway exposes capability URLs, chunk uploads, the Finish action, and the exact static files required by the sender page. Every other path returns `404`.
-- `https://phaise-drop-admin.taila25076.ts.net` is served by a dedicated Tailscale node and is reachable only inside the tailnet. It proxies directly to `app`; FileRise authentication is still required.
-- No container publishes a host port.
+- `https://truenas-nas.taila25076.ts.net` is served by the NAS's existing Tailscale node and is reachable only inside the tailnet. Tailscale Serve proxies to the app's loopback-only host binding; FileRise authentication is still required.
+- No container publishes a port on a LAN or public interface. The admin app binds only to host loopback at `127.0.0.1:18443` for Tailscale Serve.
 
 ## Deployment secrets and variables
 
 - `PERSISTENT_TOKENS_KEY` is intentionally not passed through Coolify's stack environment. On a pristine install FileRise generates it in the persistent metadata volume. Back up `metadata/persistent_tokens.key` with that volume.
-- The Tailscale auth key is intentionally not stored in Coolify. Authenticate the sidecar once against its persisted state (the production deployment uses a short-lived, volume-scoped bootstrap container). Subsequent deployments do not need the key.
 - `DROP_PUID` and `DROP_PGID`: numeric owner/group with write access to `/mnt/main/NAS/drop`. Confirm these against the TrueNAS ACL before first deployment.
 
 The compose definition intentionally uses `CHOWN_ON_START=false`: startup leaves both the ownership and mode of the SMB dataset root untouched and never recursively rewrites its ACLs.
