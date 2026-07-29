@@ -34,16 +34,34 @@ services:
       start_period: 90s
     networks:
       - default
-      - coolify
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=coolify
-      - traefik.http.routers.phaise-drop-admin.rule=Host(`drop-admin.phaise.com`)
-      - traefik.http.routers.phaise-drop-admin.entrypoints=https
-      - traefik.http.routers.phaise-drop-admin.tls=true
-      - traefik.http.routers.phaise-drop-admin.middlewares=phaise-drop-tailscale-only
-      - traefik.http.middlewares.phaise-drop-tailscale-only.ipallowlist.sourcerange=100.64.0.0/10
-      - traefik.http.services.phaise-drop-admin.loadbalancer.server.port=80
+
+  tailscale-admin:
+    build:
+      context: .
+      dockerfile: deploy/tailscale-admin/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      TS_AUTHKEY: ${TAILSCALE_AUTH_KEY:?Set TAILSCALE_AUTH_KEY in Coolify}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: phaise-drop-admin
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
+    volumes:
+      - phaise_drop_tailscale:/var/lib/tailscale
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9002/healthz | grep -q '^ok$'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - default
 
   public-gateway:
     build:
@@ -81,6 +99,7 @@ volumes:
   phaise_drop_users:
   phaise_drop_metadata:
   phaise_drop_sessions:
+  phaise_drop_tailscale:
 
 networks:
   coolify:
