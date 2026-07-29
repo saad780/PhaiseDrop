@@ -10,7 +10,6 @@ services:
       TOTAL_UPLOAD_SIZE: 32M
       SECURE: "true"
       FR_PUBLISHED_URL: https://drop.phaise.com
-      PERSISTENT_TOKENS_KEY: ${PERSISTENT_TOKENS_KEY:?Set PERSISTENT_TOKENS_KEY in Coolify}
       PUID: ${DROP_PUID:?Set DROP_PUID to the NAS dataset owner UID}
       PGID: ${DROP_PGID:?Set DROP_PGID to the NAS dataset group GID}
       CHOWN_ON_START: "false"
@@ -44,18 +43,19 @@ services:
       app:
         condition: service_healthy
     environment:
-      TS_AUTHKEY: ${TAILSCALE_AUTH_KEY:?Set TAILSCALE_AUTH_KEY in Coolify}
       TS_AUTH_ONCE: "true"
       TS_HOSTNAME: phaise-drop-admin
       TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
       TS_SERVE_CONFIG: /config/serve.json
       TS_USERSPACE: "true"
       TS_ENABLE_HEALTH_CHECK: "true"
       TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
     volumes:
       - phaise_drop_tailscale:/var/lib/tailscale
+      - phaise_drop_tailscale_socket:/var/run/tailscale
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9002/healthz | grep -q '^ok$'"]
+      test: ["CMD-SHELL", "if [ -f /var/lib/tailscale/.phaise-authenticated ]; then wget -q -O- http://127.0.0.1:9002/healthz | grep -q '^ok$'; else test -S /var/run/tailscale/tailscaled.sock; fi"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -100,6 +100,7 @@ volumes:
   phaise_drop_metadata:
   phaise_drop_sessions:
   phaise_drop_tailscale:
+  phaise_drop_tailscale_socket:
 
 networks:
   coolify:

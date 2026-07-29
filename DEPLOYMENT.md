@@ -8,10 +8,10 @@ This repository is a security-focused FileRise fork for one-way uploads to the N
 - `https://phaise-drop-admin.taila25076.ts.net` is served by a dedicated Tailscale node and is reachable only inside the tailnet. It proxies directly to `app`; FileRise authentication is still required.
 - No container publishes a host port.
 
-## Required Coolify variables
+## Deployment secrets and variables
 
-- `PERSISTENT_TOKENS_KEY`: a random 64-byte hex value kept in the secret store.
-- `TAILSCALE_AUTH_KEY`: a reusable Tailscale auth key used only for the sidecar's initial registration. The sidecar identity persists in its own named volume.
+- `PERSISTENT_TOKENS_KEY` is intentionally not passed through Coolify's stack environment. On a pristine install FileRise generates it in the persistent metadata volume. Back up `metadata/persistent_tokens.key` with that volume.
+- The Tailscale auth key is intentionally not stored in Coolify. Authenticate the sidecar once against its persisted state (the production deployment uses a short-lived, volume-scoped bootstrap container). Subsequent deployments do not need the key.
 - `DROP_PUID` and `DROP_PGID`: numeric owner/group with write access to `/mnt/main/NAS/drop`. Confirm these against the TrueNAS ACL before first deployment.
 
 The compose definition intentionally uses `CHOWN_ON_START=false`: startup leaves both the ownership and mode of the SMB dataset root untouched and never recursively rewrites its ACLs.
