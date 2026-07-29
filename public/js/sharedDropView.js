@@ -45,6 +45,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     : [];
   const dailyFileLimit = Number.isFinite(payload.dailyFileLimit) ? Number(payload.dailyFileLimit) : 0;
   const maxTotalMbPerDay = Number.isFinite(payload.maxTotalMbPerDay) ? Number(payload.maxTotalMbPerDay) : 0;
+  const maxTotalMb = Number.isFinite(payload.maxTotalMb) ? Number(payload.maxTotalMb) : 0;
+  const maxTotalBytes = maxTotalMb > 0 ? Math.round(maxTotalMb * 1024 * 1024) : 0;
+  const initiallyAcceptedBytes = Number.isFinite(payload.acceptedBytes) ? Number(payload.acceptedBytes) : 0;
+  const closeMode = String(payload.closeMode || 'window');
 
   const form = document.getElementById('shareDropUploadForm');
   const dropzone = document.getElementById('shareDropzone');
@@ -56,6 +60,8 @@ document.addEventListener('DOMContentLoaded', async function () {
   const rulesEl = document.getElementById('shareDropRules');
   const breadcrumbsEl = document.getElementById('shareBreadcrumbs');
   const themeToggleBtn = document.getElementById('shareThemeToggle');
+  const finishBtn = document.getElementById('shareDropFinishBtn');
+  const completeEl = document.getElementById('shareDropComplete');
   const dropUploadErrorId = 'shareDropUploadError';
 
   if (!form || !dropzone || !fileInput || !folderInput || !queueEl) {
@@ -158,6 +164,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   function getBasePathFromLocation() {
     try {
       let p = String(window.location.pathname || '');
+      if (/\/d\/[a-f0-9]{64}\/?$/i.test(p)) return '';
       p = p.replace(/\/api\/folder\/shareFolder\.php$/i, '');
       p = p.replace(/\/+$/, '');
       if (!p || p === '/') return '';
@@ -181,6 +188,12 @@ document.addEventListener('DOMContentLoaded', async function () {
     const pass = urlParams.get('pass') || '';
     const passParam = pass ? '&pass=' + encodeURIComponent(pass) : '';
     const p = path ? '&path=' + encodeURIComponent(path) : '';
+    if (/\/d\/[a-f0-9]{64}\/?$/i.test(String(window.location.pathname || ''))) {
+      return '/d/' + encodeURIComponent(token) + (passParam || p ? '?' : '')
+        + (passParam ? passParam.slice(1) : '')
+        + (passParam && p ? '&' : '')
+        + (p ? p.slice(1) : '');
+    }
     return withBasePath('/api/folder/shareFolder.php?token=' + encodeURIComponent(token) + passParam + p);
   }
 
@@ -241,6 +254,9 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
     if (maxTotalMbPerDay > 0) {
       parts.push(tx('share_drop_rule_daily_size_limit', { mb: maxTotalMbPerDay }, 'Daily size limit: ' + maxTotalMbPerDay + ' MB'));
+    }
+    if (maxTotalMb > 0) {
+      parts.push('Drop capacity: ' + formatBytes(maxTotalBytes) + ' total.');
     }
     if (preserveFolderStructure) {
       parts.push(tx('share_drop_rule_preserve_structure', null, 'Folder structure is preserved when available.'));
@@ -482,6 +498,52 @@ document.addEventListener('DOMContentLoaded', async function () {
     return 'upl' + String(Date.now()) + '_' + String(uploadSequence);
   }
 
+  async function makeStableChunkId(item) {
+    const file = item.file;
+    const seed = [
+      token,
+      item.relativePath,
+      file.name,
+      String(file.size || 0),
+      String(file.lastModified || 0)
+    ].join('|');
+    try {
+      if (window.crypto && window.crypto.subtle && typeof TextEncoder === 'function') {
+        const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
+        const hex = Array.from(new Uint8Array(digest))
+          .map((value) => value.toString(16).padStart(2, '0'))
+          .join('');
+        return 'pd_' + hex;
+      }
+    } catch (e) {
+      // Fall through to a session-scoped random identifier.
+    }
+    return makeUploadId();
+  }
+
+  async function getChunkStatus(uploadId, chunkNumber) {
+    const params = new URLSearchParams();
+    const tokenInput = form.querySelector('input[name="token"]');
+    const passInput = form.querySelector('input[name="pass"]');
+    const pathInput = form.querySelector('input[name="path"]');
+    const shareTokenInput = form.querySelector('input[name="share_upload_token"]');
+    params.set('token', tokenInput ? tokenInput.value : token);
+    if (passInput && passInput.value) params.set('pass', passInput.value);
+    if (pathInput && pathInput.value) params.set('path', pathInput.value);
+    if (shareTokenInput && shareTokenInput.value) params.set('share_upload_token', shareTokenInput.value);
+    params.set('resumableIdentifier', uploadId);
+    params.set('resumableChunkNumber', String(chunkNumber));
+
+    const response = await fetch(withBasePath('/api/folder/sharedDropUploadStatus.php') + '?' + params.toString(), {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store'
+    });
+    if (!response.ok) return 'not found';
+    const body = await response.json().catch(() => ({}));
+    return String(body.status || 'not found');
+  }
+
   async function uploadSingle(item) {
     const formData = new FormData();
     appendCommonFormData(formData);
@@ -489,6 +551,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     if (rel !== item.file.name) {
       formData.append('relativePath', rel);
     }
+    formData.append('phaiseUploadId', item.id);
     formData.append('fileToUpload', item.file, item.file.name);
 
     await xhrJson(uploadUrl, formData, function (evt) {
@@ -501,9 +564,19 @@ document.addEventListener('DOMContentLoaded', async function () {
   async function uploadChunked(item) {
     const rel = getRelativePathForItem(item.file);
     const totalChunks = Math.max(1, Math.ceil(item.file.size / CHUNK_SIZE));
-    const uploadId = makeUploadId();
+    const uploadId = await makeStableChunkId(item);
 
     for (let index = 1; index <= totalChunks; index++) {
+      const existingStatus = await getChunkStatus(uploadId, index);
+      if (existingStatus === 'complete') {
+        setItemStatus(item, 'uploading', 100);
+        return;
+      }
+      if (existingStatus === 'found') {
+        const foundPct = Math.round((index / totalChunks) * 100);
+        setItemStatus(item, 'uploading', foundPct, 'Resuming ' + foundPct + '%');
+        continue;
+      }
       const start = (index - 1) * CHUNK_SIZE;
       const end = Math.min(item.file.size, start + CHUNK_SIZE);
       const blob = item.file.slice(start, end);
@@ -588,6 +661,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     clearDropUploadError();
     let added = 0;
+    let plannedBytes = queue
+      .filter((entry) => entry.status === 'queued' || entry.status === 'uploading' || entry.status === 'done')
+      .reduce((total, entry) => total + Math.max(0, Number(entry.file && entry.file.size || 0)), 0);
     items.forEach((it) => {
       const file = it.file;
       if (!isFileLike(file)) return;
@@ -596,6 +672,18 @@ document.addEventListener('DOMContentLoaded', async function () {
         preserveFolderStructure ? (it.relativePath || file.webkitRelativePath || file.name) : file.name,
         file.name
       );
+
+      if (maxTotalBytes > 0 && initiallyAcceptedBytes + plannedBytes + Math.max(0, Number(file.size || 0)) > maxTotalBytes) {
+        const rejected = {
+          id: makeUploadId() + '_quota',
+          file,
+          relativePath,
+          status: 'error',
+          progress: 0
+        };
+        setItemStatus(rejected, 'error', 0, 'Skipped: this file would exceed the drop capacity.');
+        return;
+      }
 
       const id = makeUploadId() + '_' + String(queue.length + 1);
       const row = {
@@ -606,6 +694,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         progress: 0
       };
       queue.push(row);
+      plannedBytes += Math.max(0, Number(file.size || 0));
       setItemStatus(row, 'queued', 0, tx('share_drop_status_queued', null, 'Queued'));
       added += 1;
     });
@@ -769,6 +858,45 @@ document.addEventListener('DOMContentLoaded', async function () {
       fileInput.click();
     }
   });
+
+  if (finishBtn && closeMode === 'single') {
+    finishBtn.addEventListener('click', async function () {
+      if (finishBtn.disabled) return;
+      const unfinished = queue.some((item) => item.status === 'queued' || item.status === 'uploading');
+      const uploaded = Number(payload.uploadedFiles || 0) + queue.filter((item) => item.status === 'done').length;
+      if (unfinished) {
+        showDropUploadError('Wait for all queued files to finish before closing this link.', 0);
+        return;
+      }
+      if (uploaded < 1) {
+        showDropUploadError('Upload at least one file before finishing.', 0);
+        return;
+      }
+      if (!window.confirm('Close this link permanently? You will not be able to upload more files.')) return;
+
+      finishBtn.disabled = true;
+      finishBtn.textContent = 'Finishing…';
+      const finishData = new FormData();
+      appendCommonFormData(finishData);
+      try {
+        const result = await xhrJson(withBasePath('/api/folder/finishSharedDrop.php'), finishData);
+        if (!result.closed) {
+          throw new Error('This time-window drop remains open until it expires.');
+        }
+        form.hidden = true;
+        if (rulesEl) rulesEl.hidden = true;
+        if (queueEl) queueEl.hidden = true;
+        const finishWrap = finishBtn.closest('.fr-share-drop-finish');
+        if (finishWrap) finishWrap.hidden = true;
+        if (completeEl) completeEl.hidden = false;
+        clearDropUploadError();
+      } catch (err) {
+        finishBtn.disabled = false;
+        finishBtn.textContent = 'Finish upload';
+        showDropUploadError(err && err.message ? err.message : 'Could not finish this upload.', Number(err && err.status || 0));
+      }
+    });
+  }
 
   renderBreadcrumbs();
   renderRules();

@@ -1,6 +1,7 @@
 // /js/main.js — light bootstrap
 import { getBasePath, stripBase, withBase, patchFetchForBasePath } from './basePath.js?v={{APP_QVER}}';
 import { t } from './i18n.js?v={{APP_QVER}}';
+import './dropManager.js?v={{APP_QVER}}';
 
 // Expose base path for non-module scripts / debugging.
 try { window.__FR_BASE_PATH__ = getBasePath(); } catch (e) {}

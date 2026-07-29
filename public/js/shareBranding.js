@@ -4,6 +4,7 @@
   function getBasePathFromLocation() {
     try {
       let p = String(window.location.pathname || '');
+      if (/\/d\/[a-f0-9]{64}\/?$/i.test(p)) return '';
       p = p.replace(/\/api\/folder\/shareFolder\.php$/i, '');
       p = p.replace(/\/api\/file\/share\.php$/i, '');
       p = p.replace(/\/+$/, '');

@@ -2369,6 +2369,27 @@ class FolderModel
         $record['maxFileSizeMb'] = self::intFromMixed($record['maxFileSizeMb'] ?? 0, 0, 102400);
         $record['dailyFileLimit'] = self::intFromMixed($record['dailyFileLimit'] ?? 0, 0, 2000000);
         $record['maxTotalMbPerDay'] = self::intFromMixed($record['maxTotalMbPerDay'] ?? 0, 0, 2000000);
+        $record['maxTotalMb'] = self::intFromMixed($record['maxTotalMb'] ?? 0, 0, 2000000);
+        $record['acceptedBytes'] = isset($record['acceptedBytes']) && is_numeric($record['acceptedBytes'])
+            ? max(0, (int)$record['acceptedBytes'])
+            : 0;
+        $record['uploadedFiles'] = self::intFromMixed($record['uploadedFiles'] ?? 0, 0, 2000000);
+        $record['closeMode'] = strtolower(trim((string)($record['closeMode'] ?? 'window'))) === 'single'
+            ? 'single'
+            : 'window';
+        $record['idleTimeoutSeconds'] = self::intFromMixed(
+            $record['idleTimeoutSeconds'] ?? 0,
+            0,
+            2592000
+        );
+        $record['lastActivityAt'] = isset($record['lastActivityAt']) && is_numeric($record['lastActivityAt'])
+            ? max(0, (int)$record['lastActivityAt'])
+            : (isset($record['createdAt']) && is_numeric($record['createdAt']) ? max(0, (int)$record['createdAt']) : 0);
+        $record['closedAt'] = isset($record['closedAt']) && is_numeric($record['closedAt'])
+            ? max(0, (int)$record['closedAt'])
+            : 0;
+        $record['title'] = mb_substr(trim((string)($record['title'] ?? '')), 0, 120);
+        $record['instructions'] = mb_substr(trim((string)($record['instructions'] ?? '')), 0, 1000);
         $record['allowedTypes'] = self::normalizeShareAllowedTypes($record['allowedTypes'] ?? []);
         $createdBy = trim((string)($record['createdBy'] ?? ($record['user'] ?? ($record['username'] ?? ''))));
         $createdBy = preg_replace('/[\x00-\x1F\x7F]/', '', $createdBy);
@@ -2379,6 +2400,213 @@ class FolderModel
             $record['createdAt'] = max(0, (int)$record['createdAt']);
         }
         return $record;
+    }
+
+    private static function shareRecordClosedReason(array $record, ?int $now = null): ?string
+    {
+        $now = $now ?? time();
+        if (!empty($record['closedAt'])) {
+            return 'This drop is closed.';
+        }
+        if ($now > (int)($record['expires'] ?? 0)) {
+            return 'This drop has expired.';
+        }
+        $idleTimeout = max(0, (int)($record['idleTimeoutSeconds'] ?? 0));
+        $lastActivity = max(0, (int)($record['lastActivityAt'] ?? ($record['createdAt'] ?? 0)));
+        if ($idleTimeout > 0 && $lastActivity > 0 && $now > ($lastActivity + $idleTimeout)) {
+            return 'This drop closed after being idle.';
+        }
+        return null;
+    }
+
+    private static function withLockedShareLinks(callable $callback): array
+    {
+        $shareFile = self::metaRoot() . 'share_folder_links.json';
+        $lockFile = $shareFile . '.lock';
+        $lock = @fopen($lockFile, 'c+');
+        if ($lock === false || !@flock($lock, LOCK_EX)) {
+            if (is_resource($lock)) {
+                @fclose($lock);
+            }
+            return ['error' => 'Could not lock share state.'];
+        }
+
+        try {
+            $links = is_file($shareFile)
+                ? (json_decode((string)@file_get_contents($shareFile), true) ?: [])
+                : [];
+            if (!is_array($links)) {
+                $links = [];
+            }
+
+            $result = $callback($links);
+            if (!is_array($result) || !array_key_exists('links', $result) || !is_array($result['links'])) {
+                return ['error' => 'Invalid share state update.'];
+            }
+
+            $json = json_encode($result['links'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            if (!is_string($json)) {
+                return ['error' => 'Could not encode share state.'];
+            }
+            $tmp = @tempnam(dirname($shareFile), '.share-links-');
+            if ($tmp === false || @file_put_contents($tmp, $json) === false || !@rename($tmp, $shareFile)) {
+                if (is_string($tmp) && is_file($tmp)) {
+                    @unlink($tmp);
+                }
+                return ['error' => 'Could not save share state.'];
+            }
+            @chmod($shareFile, 0660);
+            return is_array($result['result'] ?? null) ? $result['result'] : ['success' => true];
+        } finally {
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
+    }
+
+    public static function reserveSharedDropUpload(string $token, string $uploadId, int $sizeBytes): array
+    {
+        if (!preg_match('/^[a-f0-9]{64}$/', $token) || !preg_match('/^[A-Za-z0-9_-]{8,160}$/', $uploadId)) {
+            return ['error' => 'Invalid upload reservation.'];
+        }
+        $sizeBytes = max(0, $sizeBytes);
+        $now = time();
+
+        // Resolve cross-source links first; findShareFolderRecord selects their metadata root.
+        if (!self::findShareFolderRecord($token)) {
+            return ['error' => 'Share link not found.'];
+        }
+
+        return self::withLockedShareLinks(function (array $links) use ($token, $uploadId, $sizeBytes, $now): array {
+            if (!isset($links[$token]) || !is_array($links[$token])) {
+                return ['links' => $links, 'result' => ['error' => 'Share link not found.']];
+            }
+            $record = self::normalizeShareFolderRecord($links[$token]);
+            $closed = self::shareRecordClosedReason($record, $now);
+            if ($closed !== null) {
+                return ['links' => $links, 'result' => ['error' => $closed]];
+            }
+
+            $reservations = is_array($record['uploadReservations'] ?? null) ? $record['uploadReservations'] : [];
+            foreach ($reservations as $id => $reservation) {
+                $touchedAt = is_array($reservation) ? (int)($reservation['touchedAt'] ?? 0) : 0;
+                if ($touchedAt <= 0 || $touchedAt < ($now - 172800)) {
+                    unset($reservations[$id]);
+                }
+            }
+
+            $completed = is_array($record['completedUploads'] ?? null) ? $record['completedUploads'] : [];
+            foreach ($completed as $id => $completedAt) {
+                if ((int)$completedAt < ($now - 2592000)) {
+                    unset($completed[$id]);
+                }
+            }
+            if (isset($completed[$uploadId])) {
+                return ['links' => $links, 'result' => ['success' => true, 'alreadyCompleted' => true]];
+            }
+
+            $reservedBytes = 0;
+            foreach ($reservations as $reservation) {
+                if (is_array($reservation)) {
+                    $reservedBytes += max(0, (int)($reservation['bytes'] ?? 0));
+                }
+            }
+            $existingBytes = isset($reservations[$uploadId]) && is_array($reservations[$uploadId])
+                ? max(0, (int)($reservations[$uploadId]['bytes'] ?? 0))
+                : 0;
+            $maxTotalMb = max(0, (int)($record['maxTotalMb'] ?? 0));
+            $maxTotalBytes = $maxTotalMb > 0 ? $maxTotalMb * 1024 * 1024 : 0;
+            $projected = max(0, (int)($record['acceptedBytes'] ?? 0)) + $reservedBytes - $existingBytes + $sizeBytes;
+            if ($maxTotalBytes > 0 && $projected > $maxTotalBytes) {
+                return ['links' => $links, 'result' => ['error' => 'This upload would exceed the drop total size limit.']];
+            }
+
+            $reservations[$uploadId] = ['bytes' => $sizeBytes, 'touchedAt' => $now];
+            $record['uploadReservations'] = $reservations;
+            $record['completedUploads'] = $completed;
+            $record['lastActivityAt'] = $now;
+            $links[$token] = $record;
+            return ['links' => $links, 'result' => ['success' => true]];
+        });
+    }
+
+    public static function completeSharedDropUpload(string $token, string $uploadId, int $sizeBytes): array
+    {
+        $sizeBytes = max(0, $sizeBytes);
+        $now = time();
+        return self::withLockedShareLinks(function (array $links) use ($token, $uploadId, $sizeBytes, $now): array {
+            if (!isset($links[$token]) || !is_array($links[$token])) {
+                return ['links' => $links, 'result' => ['error' => 'Share link not found.']];
+            }
+            $record = self::normalizeShareFolderRecord($links[$token]);
+            $completed = is_array($record['completedUploads'] ?? null) ? $record['completedUploads'] : [];
+            if (isset($completed[$uploadId])) {
+                return ['links' => $links, 'result' => ['success' => true, 'alreadyCompleted' => true]];
+            }
+            $reservations = is_array($record['uploadReservations'] ?? null) ? $record['uploadReservations'] : [];
+            $committedBytes = isset($reservations[$uploadId]) && is_array($reservations[$uploadId])
+                ? max(0, (int)($reservations[$uploadId]['bytes'] ?? $sizeBytes))
+                : $sizeBytes;
+            unset($reservations[$uploadId]);
+            $completed[$uploadId] = $now;
+            if (count($completed) > 2000) {
+                asort($completed, SORT_NUMERIC);
+                $completed = array_slice($completed, -2000, null, true);
+            }
+            $record['uploadReservations'] = $reservations;
+            $record['completedUploads'] = $completed;
+            $record['acceptedBytes'] = max(0, (int)($record['acceptedBytes'] ?? 0)) + $committedBytes;
+            $record['uploadedFiles'] = max(0, (int)($record['uploadedFiles'] ?? 0)) + 1;
+            $record['lastActivityAt'] = $now;
+            $links[$token] = $record;
+            return ['links' => $links, 'result' => [
+                'success' => true,
+                'acceptedBytes' => $record['acceptedBytes'],
+                'uploadedFiles' => $record['uploadedFiles'],
+            ]];
+        });
+    }
+
+    public static function releaseSharedDropUpload(string $token, string $uploadId): void
+    {
+        self::withLockedShareLinks(function (array $links) use ($token, $uploadId): array {
+            if (isset($links[$token]) && is_array($links[$token])) {
+                $reservations = is_array($links[$token]['uploadReservations'] ?? null)
+                    ? $links[$token]['uploadReservations']
+                    : [];
+                unset($reservations[$uploadId]);
+                $links[$token]['uploadReservations'] = $reservations;
+            }
+            return ['links' => $links, 'result' => ['success' => true]];
+        });
+    }
+
+    public static function finishSharedDrop(string $token): array
+    {
+        $now = time();
+        return self::withLockedShareLinks(function (array $links) use ($token, $now): array {
+            if (!isset($links[$token]) || !is_array($links[$token])) {
+                return ['links' => $links, 'result' => ['error' => 'Share link not found.']];
+            }
+            $record = self::normalizeShareFolderRecord($links[$token]);
+            if (($record['mode'] ?? '') !== 'drop') {
+                return ['links' => $links, 'result' => ['error' => 'This link is not a drop.']];
+            }
+            if (($record['closeMode'] ?? 'window') !== 'single') {
+                return ['links' => $links, 'result' => ['success' => true, 'closed' => false]];
+            }
+            if (max(0, (int)($record['uploadedFiles'] ?? 0)) < 1) {
+                return ['links' => $links, 'result' => ['error' => 'Upload at least one file before finishing.']];
+            }
+            $reservations = is_array($record['uploadReservations'] ?? null) ? $record['uploadReservations'] : [];
+            if (!empty($reservations)) {
+                return ['links' => $links, 'result' => ['error' => 'Wait for active uploads to finish before closing this drop.']];
+            }
+            $record['closedAt'] = $now;
+            $record['lastActivityAt'] = $now;
+            $record['uploadReservations'] = [];
+            $links[$token] = $record;
+            return ['links' => $links, 'result' => ['success' => true, 'closed' => true, 'closedAt' => $now]];
+        });
     }
 
     private static function isShareDropMode(array $record): bool
@@ -2584,8 +2812,9 @@ class FolderModel
             return ["error" => "Share link not found."];
         }
 
-        if (time() > ($record['expires'] ?? 0)) {
-            return ["error" => "This share link has expired."];
+        $closedReason = self::shareRecordClosedReason($record);
+        if ($closedReason !== null) {
+            return ["error" => $closedReason, "closed" => true];
         }
 
         if (!empty($record['password']) && empty($providedPass)) {
@@ -2755,7 +2984,7 @@ class FolderModel
 
         // Token
         try {
-            $token = bin2hex(random_bytes(16));
+            $token = bin2hex(random_bytes(32));
         } catch (\Throwable $e) {
             return ["error" => "Could not generate token."];
         }
@@ -2782,6 +3011,11 @@ class FolderModel
         $maxFileSizeMb = self::intFromMixed($options['maxFileSizeMb'] ?? 0, 0, 102400);
         $dailyFileLimit = self::intFromMixed($options['dailyFileLimit'] ?? 0, 0, 2000000);
         $maxTotalMbPerDay = self::intFromMixed($options['maxTotalMbPerDay'] ?? 0, 0, 2000000);
+        $maxTotalMb = self::intFromMixed($options['maxTotalMb'] ?? 0, 0, 2000000);
+        $closeMode = strtolower(trim((string)($options['closeMode'] ?? 'window'))) === 'single' ? 'single' : 'window';
+        $idleTimeoutSeconds = self::intFromMixed($options['idleTimeoutSeconds'] ?? 0, 0, 2592000);
+        $title = mb_substr(trim((string)($options['title'] ?? '')), 0, 120);
+        $instructions = mb_substr(trim((string)($options['instructions'] ?? '')), 0, 1000);
         $allowedTypes = self::normalizeShareAllowedTypes($options['allowedTypes'] ?? []);
         $createdBy = trim((string)($options['createdBy'] ?? ''));
         $createdBy = preg_replace('/[\x00-\x1F\x7F]/', '', $createdBy);
@@ -2792,20 +3026,7 @@ class FolderModel
         $expires       = time() + max(1, $expirationSeconds);
         $hashedPassword = $password !== "" ? password_hash($password, PASSWORD_DEFAULT) : "";
 
-        $shareFile = self::metaRoot() . "share_folder_links.json";
-        $links = file_exists($shareFile)
-            ? (json_decode(file_get_contents($shareFile), true) ?? [])
-            : [];
-
-        // cleanup expired
-        $now = time();
-        foreach ($links as $k => $v) {
-            if (!empty($v['expires']) && $v['expires'] < $now) {
-                unset($links[$k]);
-            }
-        }
-
-        $links[$token] = [
+        $record = [
             "folder"      => $relative,
             "expires"     => $expires,
             "password"    => $hashedPassword,
@@ -2819,12 +3040,33 @@ class FolderModel
             "allowedTypes" => $allowedTypes,
             "dailyFileLimit" => $dailyFileLimit,
             "maxTotalMbPerDay" => $maxTotalMbPerDay,
+            "maxTotalMb" => $maxTotalMb,
+            "acceptedBytes" => 0,
+            "uploadedFiles" => 0,
+            "closeMode" => $closeMode,
+            "idleTimeoutSeconds" => $idleTimeoutSeconds,
+            "lastActivityAt" => $createdAt,
+            "closedAt" => 0,
+            "title" => $title,
+            "instructions" => $instructions,
+            "uploadReservations" => [],
+            "completedUploads" => [],
             "createdBy" => is_string($createdBy) ? $createdBy : '',
             "createdAt" => $createdAt,
         ];
 
-        if (file_put_contents($shareFile, json_encode($links, JSON_PRETTY_PRINT), LOCK_EX) === false) {
-            return ["error" => "Could not save share link."];
+        $saved = self::withLockedShareLinks(function (array $links) use ($token, $record): array {
+            $now = time();
+            foreach ($links as $key => $value) {
+                if (!empty($value['expires']) && (int)$value['expires'] < $now) {
+                    unset($links[$key]);
+                }
+            }
+            $links[$token] = $record;
+            return ['links' => $links, 'result' => ['success' => true]];
+        });
+        if (empty($saved['success'])) {
+            return ["error" => (string)($saved['error'] ?? "Could not save share link.")];
         }
 
         // Build URL
@@ -2834,10 +3076,14 @@ class FolderModel
         $host    = $_SERVER['HTTP_HOST'] ?? gethostbyname(gethostname());
         $publishedBase = defined('FR_PUBLISHED_URL_EFFECTIVE') ? trim((string)FR_PUBLISHED_URL_EFFECTIVE) : '';
         if ($publishedBase !== '') {
-            $link = rtrim($publishedBase, '/') . "/api/folder/shareFolder.php?token=" . urlencode($token);
+            $link = rtrim($publishedBase, '/') . ($mode === 'drop'
+                ? "/d/" . rawurlencode($token)
+                : "/api/folder/shareFolder.php?token=" . urlencode($token));
         } else {
             $baseUrl = $scheme . '://' . rtrim($host, '/');
-            $link    = $baseUrl . fr_with_base_path("/api/folder/shareFolder.php?token=" . urlencode($token));
+            $link = $baseUrl . fr_with_base_path($mode === 'drop'
+                ? "/d/" . rawurlencode($token)
+                : "/api/folder/shareFolder.php?token=" . urlencode($token));
         }
 
         return ["token" => $token, "expires" => $expires, "link" => $link, "mode" => $mode];

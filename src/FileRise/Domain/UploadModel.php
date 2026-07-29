@@ -1449,8 +1449,9 @@ class UploadModel
         }
 
         if (!WorkerLauncher::canRunForeground()) {
-            error_log('ClamAV scan skipped: PHP command execution is unavailable on this host.');
-            return null;
+            error_log('ClamAV scan failed closed: PHP command execution is unavailable on this host.');
+            @unlink($path);
+            return ['error' => 'Upload unavailable: malware scanning could not run. Please try again later.'];
         }
 
         $cmd = defined('VIRUS_SCAN_CMD') ? VIRUS_SCAN_CMD : 'clamscan';
@@ -1482,10 +1483,11 @@ class UploadModel
             ];
         }
 
-        // >1 = scanner error (missing DB, bad config, etc.)
-        // Log but do NOT block the upload.
+        // >1 = scanner error (missing DB, bad config, etc.). Public drop uploads
+        // must fail closed: an unavailable scanner is never treated as clean.
         error_log("ClamAV scan error (exit={$exitCode}, cmd={$cmd}): {$msg}");
-        return null;
+        @unlink($path);
+        return ['error' => 'Upload unavailable: malware scanning could not verify this file. Please try again later.'];
     }
 
     /**

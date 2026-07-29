@@ -217,6 +217,56 @@
                       <button id="createFolderBtn" class="btn btn-primary" data-i18n-title="create_folder">
                         <i class="material-icons">create_new_folder</i>
                       </button>
+                      <button id="createDropBtn" class="btn btn-success ml-2" title="Create secure file drop" style="display:none;">
+                        <i class="material-icons">add_link</i>
+                      </button>
+                      <div id="createDropModal" class="modal" style="display:none;">
+                        <div class="modal-content phaise-drop-modal">
+                          <h4>Create secure file drop</h4>
+                          <p class="phaise-drop-lead">Create a private upload link. Senders can add files and folders, but can never browse your NAS.</p>
+                          <label for="dropTitle">Drop name</label>
+                          <input id="dropTitle" class="form-control" maxlength="120" placeholder="e.g. Smith wedding footage" autocomplete="off">
+                          <label for="dropInstructions">Instructions <span class="text-muted">(optional)</span></label>
+                          <textarea id="dropInstructions" class="form-control" maxlength="1000" rows="3" placeholder="What should the sender upload?"></textarea>
+                          <div class="phaise-drop-grid">
+                            <div>
+                              <label for="dropCloseMode">Link behavior</label>
+                              <select id="dropCloseMode" class="form-control">
+                                <option value="single" selected>Close when sender finishes</option>
+                                <option value="window">Stay open until expiry</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label for="dropExpiresDays">Hard expiry (days)</label>
+                              <input id="dropExpiresDays" class="form-control" type="number" min="1" max="30" value="7">
+                            </div>
+                            <div>
+                              <label for="dropIdleHours">Idle timeout (hours)</label>
+                              <input id="dropIdleHours" class="form-control" type="number" min="1" max="720" value="48">
+                            </div>
+                            <div>
+                              <label for="dropMaxFileGb">Maximum per file (GB)</label>
+                              <input id="dropMaxFileGb" class="form-control" type="number" min="1" max="100" value="25">
+                            </div>
+                            <div>
+                              <label for="dropMaxTotalGb">Maximum total (GB)</label>
+                              <input id="dropMaxTotalGb" class="form-control" type="number" min="1" max="1953" value="100">
+                            </div>
+                          </div>
+                          <div id="dropCreateResult" class="phaise-drop-result" hidden>
+                            <label for="dropCreatedLink">Share this link</label>
+                            <div class="phaise-drop-link-row">
+                              <input id="dropCreatedLink" class="form-control" readonly>
+                              <button id="copyDropLinkBtn" type="button" class="btn btn-primary">Copy</button>
+                            </div>
+                            <small id="dropCreatedFolder" class="text-muted"></small>
+                          </div>
+                          <div class="phaise-drop-actions">
+                            <button id="cancelCreateDrop" type="button" class="btn btn-secondary">Close</button>
+                            <button id="submitCreateDrop" type="button" class="btn btn-success">Create drop</button>
+                          </div>
+                        </div>
+                      </div>
                       <div id="createFolderModal" class="modal">
                         <div class="modal-content">
                           <h4 data-i18n-key="create_folder_title">Create Folder</h4>

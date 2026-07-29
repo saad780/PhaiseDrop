@@ -196,10 +196,11 @@ class FolderController
         }
 
         $allowedTypes = self::normalizeSharedAllowedTypes($record['allowedTypes'] ?? []);
-        if (empty($allowedTypes)) {
+        $isManagedDrop = (($record['mode'] ?? '') === 'drop');
+        if (empty($allowedTypes) && !$isManagedDrop) {
             $allowedTypes = self::defaultSharedAllowedTypes();
         }
-        if ($ext === '' || !in_array($ext, $allowedTypes, true)) {
+        if (!empty($allowedTypes) && ($ext === '' || !in_array($ext, $allowedTypes, true))) {
             return 'File type not allowed.';
         }
 
@@ -2353,10 +2354,39 @@ class FolderController
         }
 
         if (isset($data['error'])) {
-            http_response_code(403);
-            header('Content-Type: application/json');
-            echo json_encode(["error" => $data['error']]);
-            exit;
+            $isClosed = !empty($data['closed']);
+            http_response_code($isClosed ? 410 : 404);
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('X-Frame-Options: DENY');
+            header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; style-src 'self'; img-src 'self'; font-src 'self';");
+            header('Content-Type: text/html; charset=utf-8'); ?>
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title><?php echo $isClosed ? 'Drop closed' : 'Drop unavailable'; ?></title>
+                <link rel="stylesheet" href="<?php echo htmlspecialchars(fr_with_base_path('/css/vendor/roboto.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>">
+                <link rel="stylesheet" href="<?php echo htmlspecialchars(fr_with_base_path('/css/share.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>">
+            </head>
+            <body class="fr-share-body">
+                <div class="fr-share-shell">
+                    <div class="fr-share-card">
+                        <div class="fr-share-card-header">
+                            <img class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="Phaise Drop">
+                            <div>
+                                <div class="fr-share-title"><?php echo $isClosed ? 'This drop is closed' : 'This drop is unavailable'; ?></div>
+                                <div class="fr-share-subtitle"><?php echo $isClosed
+                                    ? 'The files were delivered or the upload window ended. You can close this page.'
+                                    : 'Check the link with the person who sent it to you.'; ?></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            <?php exit;
         }
         $adminConfig = AdminModel::getConfig();
         $sharedMaxUploadSize = (isset($adminConfig['sharedMaxUploadSize']) && is_numeric($adminConfig['sharedMaxUploadSize']))
@@ -2390,7 +2420,9 @@ class FolderController
         $aiEnabled = !empty($record['aiEnabled']);
         $preserveFolderStructure = !isset($record['preserveFolderStructure']) || !empty($record['preserveFolderStructure']);
 
-        $displayName = $isDropMode ? 'Upload files' : 'Shared Folder';
+        $dropTitle = trim((string)($record['title'] ?? ''));
+        $dropInstructions = trim((string)($record['instructions'] ?? ''));
+        $displayName = $isDropMode ? ($dropTitle !== '' ? $dropTitle : 'Upload files') : 'Shared Folder';
         if (!$isDropMode) {
             if ($currentPath !== '') {
                 $displayName = basename($currentPath);
@@ -2412,6 +2444,10 @@ class FolderController
         $allowedTypes = self::normalizeSharedAllowedTypes($record['allowedTypes'] ?? []);
         $dailyFileLimit = (isset($record['dailyFileLimit']) && is_numeric($record['dailyFileLimit'])) ? (int)$record['dailyFileLimit'] : 0;
         $maxTotalMbPerDay = (isset($record['maxTotalMbPerDay']) && is_numeric($record['maxTotalMbPerDay'])) ? (int)$record['maxTotalMbPerDay'] : 0;
+        $maxTotalMb = (isset($record['maxTotalMb']) && is_numeric($record['maxTotalMb'])) ? (int)$record['maxTotalMb'] : 0;
+        $acceptedBytes = (isset($record['acceptedBytes']) && is_numeric($record['acceptedBytes'])) ? max(0, (int)$record['acceptedBytes']) : 0;
+        $uploadedFiles = (isset($record['uploadedFiles']) && is_numeric($record['uploadedFiles'])) ? max(0, (int)$record['uploadedFiles']) : 0;
+        $closeMode = (($record['closeMode'] ?? 'window') === 'single') ? 'single' : 'window';
 
         $uploadToken = '';
         if ($allowUpload) {
@@ -2506,10 +2542,13 @@ class FolderController
                         </div>
                     <?php elseif ($allowUpload && $isDropMode) : ?>
                         <div class="fr-share-card fr-share-upload fr-share-upload-drop">
-                            <div class="fr-share-upload-title">Upload files</div>
+                            <div class="fr-share-upload-title">Send files securely</div>
                             <div class="fr-share-upload-subtitle">
                                 Uploaders can't see existing files<?php echo $allowSubfolders ? '.' : ', and folder uploads are disabled for this link.'; ?>
                             </div>
+                            <?php if ($dropInstructions !== '') : ?>
+                                <div class="fr-share-drop-instructions"><?php echo nl2br(htmlspecialchars($dropInstructions, ENT_QUOTES, 'UTF-8')); ?></div>
+                            <?php endif; ?>
                             <form id="shareDropUploadForm" action="<?php echo htmlspecialchars(fr_with_base_path('/api/folder/uploadToSharedFolder.php'), ENT_QUOTES, 'UTF-8'); ?>" method="post" enctype="multipart/form-data" class="fr-share-upload-form fr-share-upload-form-drop">
                                 <input type="hidden" name="token" value="<?php echo htmlspecialchars($token, ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php if (!empty($providedPass)) : ?>
@@ -2537,6 +2576,19 @@ class FolderController
                             </form>
                             <div id="shareDropRules" class="fr-share-drop-rules"></div>
                             <div id="shareDropQueue" class="fr-share-drop-queue"></div>
+                            <?php if ($closeMode === 'single') : ?>
+                                <div class="fr-share-drop-finish">
+                                    <div>
+                                        <strong>Everything uploaded?</strong>
+                                        <div class="fr-share-upload-subtitle">Finish closes this private link permanently.</div>
+                                    </div>
+                                    <button type="button" id="shareDropFinishBtn" class="fr-share-btn">Finish upload</button>
+                                </div>
+                            <?php endif; ?>
+                            <div id="shareDropComplete" class="fr-share-drop-complete" hidden role="status">
+                                <strong>Upload complete</strong>
+                                <span>Your files were delivered. This link is now closed.</span>
+                            </div>
                         </div>
                     <?php endif; ?>
 
@@ -2594,6 +2646,10 @@ class FolderController
                 'allowedTypes' => $allowedTypes,
                 'dailyFileLimit' => max(0, $dailyFileLimit),
                 'maxTotalMbPerDay' => max(0, $maxTotalMbPerDay),
+                'maxTotalMb' => max(0, $maxTotalMb),
+                'acceptedBytes' => $acceptedBytes,
+                'uploadedFiles' => $uploadedFiles,
+                'closeMode' => $closeMode,
             ], JSON_HEX_TAG | JSON_HEX_AMP); ?></script>
             <script src="<?php echo htmlspecialchars(fr_with_base_path('/js/shareBranding.js?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" defer></script>
             <?php if ($isDropMode) : ?>
@@ -2609,6 +2665,128 @@ class FolderController
     }
 
     /* -------------------- API: Create Share Folder Link -------------------- */
+    public function createDrop(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+        self::requireAuth();
+        self::requireAdmin();
+        self::requireCsrf();
+        self::requireNotReadOnly();
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $in = $this->readJsonBody();
+        $title = trim((string)($in['title'] ?? ''));
+        $title = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $title);
+        $title = is_string($title) ? trim(preg_replace('/\s+/u', ' ', $title)) : '';
+        if ($title === '' || mb_strlen($title) > 120) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Enter a drop name of 1 to 120 characters.']);
+            exit;
+        }
+
+        $instructions = trim((string)($in['instructions'] ?? ''));
+        $instructions = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/u', '', $instructions);
+        if (!is_string($instructions) || mb_strlen($instructions) > 1000) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Instructions must be 1,000 characters or fewer.']);
+            exit;
+        }
+
+        $closeMode = strtolower(trim((string)($in['closeMode'] ?? 'single'))) === 'window'
+            ? 'window'
+            : 'single';
+        $expiresDays = isset($in['expiresDays']) && is_numeric($in['expiresDays'])
+            ? max(1, min(30, (int)$in['expiresDays']))
+            : 7;
+        $idleHours = isset($in['idleHours']) && is_numeric($in['idleHours'])
+            ? max(1, min(720, (int)$in['idleHours']))
+            : 48;
+        $maxFileSizeMb = isset($in['maxFileSizeMb']) && is_numeric($in['maxFileSizeMb'])
+            ? max(1, min(102400, (int)$in['maxFileSizeMb']))
+            : 25600;
+        $maxTotalMb = isset($in['maxTotalMb']) && is_numeric($in['maxTotalMb'])
+            ? max(1, min(2000000, (int)$in['maxTotalMb']))
+            : 102400;
+
+        $username = trim((string)($_SESSION['username'] ?? 'admin'));
+        $safeTitle = preg_replace('/[<>:"\/\\|?*\x00-\x1F]+/u', '-', $title);
+        $safeTitle = is_string($safeTitle) ? trim(preg_replace('/\s+/u', ' ', $safeTitle), '. ') : '';
+        if ($safeTitle === '') {
+            $safeTitle = 'Files';
+        }
+        $safeTitle = mb_substr($safeTitle, 0, 80);
+        try {
+            $suffix = bin2hex(random_bytes(3));
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Could not generate a drop identifier.']);
+            exit;
+        }
+        $folderName = 'Drop ' . gmdate('Y-m-d') . ' - ' . $safeTitle . ' - ' . $suffix;
+
+        $created = FolderModel::createFolder($folderName, 'root', $username);
+        if (empty($created['success'])) {
+            http_response_code(400);
+            echo json_encode(['error' => (string)($created['error'] ?? 'Could not create the destination folder.')]);
+            exit;
+        }
+        $folder = (string)($created['folder'] ?? $folderName);
+
+        $share = FolderModel::createShareFolderLink(
+            $folder,
+            $expiresDays * 86400,
+            '',
+            1,
+            1,
+            [
+                'mode' => 'drop',
+                'hideListing' => 1,
+                'preserveFolderStructure' => 1,
+                'maxFileSizeMb' => $maxFileSizeMb,
+                'maxTotalMb' => $maxTotalMb,
+                'closeMode' => $closeMode,
+                'idleTimeoutSeconds' => $idleHours * 3600,
+                'title' => $title,
+                'instructions' => $instructions,
+                'createdBy' => $username,
+                'createdAt' => time(),
+            ]
+        );
+        if (!empty($share['error'])) {
+            FolderModel::deleteFolderRecursiveAdmin($folder);
+            http_response_code(500);
+            echo json_encode(['error' => (string)$share['error']]);
+            exit;
+        }
+
+        AuditHook::log('drop.create', [
+            'user' => $username,
+            'folder' => $folder,
+            'path' => $folder,
+            'meta' => [
+                'tokenFingerprint' => self::shareTokenFingerprint((string)$share['token']),
+                'closeMode' => $closeMode,
+                'expiresDays' => $expiresDays,
+                'maxFileSizeMb' => $maxFileSizeMb,
+                'maxTotalMb' => $maxTotalMb,
+            ],
+        ]);
+
+        echo json_encode([
+            'success' => true,
+            'folder' => $folder,
+            'token' => $share['token'],
+            'link' => $share['link'],
+            'expires' => $share['expires'],
+            'closeMode' => $closeMode,
+        ], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
     public function createShareFolderLink(): void
     {
         header('Content-Type: application/json');
@@ -2654,6 +2832,13 @@ class FolderController
             : 0;
         $maxTotalMbPerDay = isset($in['maxTotalMbPerDay']) && is_numeric($in['maxTotalMbPerDay'])
             ? max(0, min(2000000, (int)$in['maxTotalMbPerDay']))
+            : 0;
+        $maxTotalMb = isset($in['maxTotalMb']) && is_numeric($in['maxTotalMb'])
+            ? max(0, min(2000000, (int)$in['maxTotalMb']))
+            : 0;
+        $closeMode = strtolower(trim((string)($in['closeMode'] ?? 'window'))) === 'single' ? 'single' : 'window';
+        $idleTimeoutSeconds = isset($in['idleTimeoutSeconds']) && is_numeric($in['idleTimeoutSeconds'])
+            ? max(0, min(2592000, (int)$in['idleTimeoutSeconds']))
             : 0;
         $allowedTypes = self::normalizeSharedAllowedTypes($in['allowedTypes'] ?? []);
 
@@ -2740,6 +2925,11 @@ class FolderController
                 'allowedTypes' => $allowedTypes,
                 'dailyFileLimit' => $dailyFileLimit,
                 'maxTotalMbPerDay' => $maxTotalMbPerDay,
+                'maxTotalMb' => $maxTotalMb,
+                'closeMode' => $closeMode,
+                'idleTimeoutSeconds' => $idleTimeoutSeconds,
+                'title' => (string)($in['title'] ?? ''),
+                'instructions' => (string)($in['instructions'] ?? ''),
                 'createdBy' => $username,
                 'createdAt' => time(),
             ]
@@ -2840,6 +3030,7 @@ class FolderController
         $relativePath = '';
         $filesForModel = [];
         $requestParams = ['folder' => $targetFolder, 'source' => 'shared'];
+        $dropUploadId = '';
 
         if ($isChunkUpload) {
             $chunkNo = isset($_POST['resumableChunkNumber']) ? (int)$_POST['resumableChunkNumber'] : 0;
@@ -2852,6 +3043,7 @@ class FolderController
             if ($identifier === '' || !preg_match('/^[A-Za-z0-9_-]{1,120}$/', $identifier)) {
                 $respondError(400, 'Invalid upload identifier.');
             }
+            $dropUploadId = 'chunk_' . $identifier;
 
             $filename = basename(trim((string)($_POST['resumableFilename'] ?? '')));
             if ($filename === '' || !preg_match(REGEX_FILE_NAME, $filename)) {
@@ -2957,6 +3149,10 @@ class FolderController
                 $requestParams['relativePath'] = $relativePath;
             }
             $filesForModel['file'] = $fileUpload;
+            $clientUploadId = trim((string)($_POST['phaiseUploadId'] ?? ''));
+            $dropUploadId = preg_match('/^[A-Za-z0-9_-]{8,160}$/', $clientUploadId)
+                ? $clientUploadId
+                : ('single_' . bin2hex(random_bytes(16)));
         }
 
         $ruleError = self::validateSharedUploadRules($record, $filename, $sizeBytes);
@@ -2970,8 +3166,19 @@ class FolderController
             $respondError(429, $quotaError);
         }
 
+        $isManagedDrop = (($record['mode'] ?? '') === 'drop') && preg_match('/^[a-f0-9]{64}$/', $token);
+        if ($isManagedDrop) {
+            $reservation = FolderModel::reserveSharedDropUpload($token, $dropUploadId, $sizeBytes);
+            if (!empty($reservation['error'])) {
+                $respondError(429, (string)$reservation['error']);
+            }
+        }
+
         $result = UploadModel::handleUpload($requestParams, $filesForModel);
         if (isset($result['error'])) {
+            if ($isManagedDrop) {
+                FolderModel::releaseSharedDropUpload($token, $dropUploadId);
+            }
             $respondError(isset($result['code']) ? (int)$result['code'] : 400, (string)$result['error']);
         }
 
@@ -2979,6 +3186,12 @@ class FolderController
         $isSuccess = isset($result['success']) && !$isChunkIntermediate;
 
         if ($isSuccess) {
+            if ($isManagedDrop) {
+                $committed = FolderModel::completeSharedDropUpload($token, $dropUploadId, $sizeBytes);
+                if (!empty($committed['error'])) {
+                    error_log('Drop quota commit failed for ' . $tokenHash . ': ' . (string)$committed['error']);
+                }
+            }
             self::incrementSharedDailyQuota($tokenHash, $sizeBytes);
             $folderKey = ACL::normalizeFolder($targetFolder);
             $effectiveRelPath = $relativePath !== '' ? str_replace('\\', '/', ltrim($relativePath, '/')) : $filename;
@@ -3001,6 +3214,108 @@ class FolderController
             exit;
         }
 
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
+
+    public function sharedDropUploadStatus(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+            http_response_code(405);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $token = self::getQueryString('token');
+        $providedPass = self::getQueryString('pass');
+        $subPath = self::getQueryString('path');
+        $uploadToken = self::getQueryString('share_upload_token');
+        $identifier = self::getQueryString('resumableIdentifier');
+        $chunkNumber = self::getQueryInt('resumableChunkNumber');
+        if (!preg_match('/^[a-f0-9]{64}$/', $token)
+            || !preg_match('/^[A-Za-z0-9_-]{1,120}$/', $identifier)
+            || $chunkNumber === null
+            || $chunkNumber < 1) {
+            http_response_code(400);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Invalid resumable upload status request.']);
+            exit;
+        }
+
+        $secret = (string)($GLOBALS['encryptionKey'] ?? '');
+        $expectedScoped = $secret !== '' ? hash_hmac('sha256', $token . '|' . $subPath . '|' . $providedPass, $secret) : '';
+        $expectedGlobal = $secret !== '' ? hash_hmac('sha256', $token . '|' . $providedPass, $secret) : '';
+        if ($uploadToken === '' || ($expectedScoped === '' && $expectedGlobal === '')
+            || (!hash_equals($expectedScoped, $uploadToken) && !hash_equals($expectedGlobal, $uploadToken))) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Upload token missing or invalid.']);
+            exit;
+        }
+
+        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath);
+        if (!empty($ctx['error']) || !empty($ctx['needs_password'])) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => (string)($ctx['error'] ?? 'Password required.')]);
+            exit;
+        }
+        $record = is_array($ctx['record'] ?? null) ? $ctx['record'] : [];
+        $dropUploadId = 'chunk_' . $identifier;
+        if (isset($record['completedUploads'][$dropUploadId])) {
+            header('Cache-Control: no-store');
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['status' => 'complete']);
+            exit;
+        }
+
+        $targetFolder = (string)($ctx['folder'] ?? 'root');
+        $result = UploadModel::handleUpload([
+            'folder' => $targetFolder === '' ? 'root' : $targetFolder,
+            'source' => 'shared',
+            'resumableChunkNumber' => $chunkNumber,
+            'resumableIdentifier' => $identifier,
+        ], []);
+        header('Cache-Control: no-store');
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
+
+    public function finishSharedDrop(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $token = trim((string)($_POST['token'] ?? ''));
+        $providedPass = (string)($_POST['pass'] ?? '');
+        $uploadToken = (string)($_POST['share_upload_token'] ?? '');
+        if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
+            http_response_code(400);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Invalid drop token.']);
+            exit;
+        }
+
+        $secret = (string)($GLOBALS['encryptionKey'] ?? '');
+        $expected = $secret !== '' ? hash_hmac('sha256', $token . '|' . $providedPass, $secret) : '';
+        if ($expected === '' || $uploadToken === '' || !hash_equals($expected, $uploadToken)) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Finish token missing or invalid.']);
+            exit;
+        }
+
+        $result = FolderModel::finishSharedDrop($token);
+        if (!empty($result['error'])) {
+            http_response_code(400);
+        }
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode($result);
         exit;
