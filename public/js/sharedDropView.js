@@ -164,7 +164,11 @@ document.addEventListener('DOMContentLoaded', async function () {
   function getBasePathFromLocation() {
     try {
       let p = String(window.location.pathname || '');
-      if (/\/d\/[a-f0-9]{64}\/?$/i.test(p)) return '';
+      const publicRoute = p.match(/^(.*)\/(?:[a-z]{4}|d\/(?:[a-z]{4}|[a-f0-9]{64}))\/?$/i);
+      if (publicRoute) {
+        const base = String(publicRoute[1] || '').replace(/\/+$/, '');
+        return base === '/' ? '' : base;
+      }
       p = p.replace(/\/api\/folder\/shareFolder\.php$/i, '');
       p = p.replace(/\/+$/, '');
       if (!p || p === '/') return '';
@@ -186,14 +190,16 @@ document.addEventListener('DOMContentLoaded', async function () {
   function buildShareUrl(path) {
     const urlParams = new URLSearchParams(window.location.search || '');
     const pass = urlParams.get('pass') || '';
+    const publicPath = String(window.location.pathname || '').replace(/\/+$/, '');
+    if (/\/(?:[a-z]{4}|d\/(?:[a-z]{4}|[a-f0-9]{64}))$/i.test(publicPath)) {
+      const query = new URLSearchParams();
+      if (pass) query.set('pass', pass);
+      if (path) query.set('path', path);
+      const encoded = query.toString();
+      return publicPath + (encoded ? '?' + encoded : '');
+    }
     const passParam = pass ? '&pass=' + encodeURIComponent(pass) : '';
     const p = path ? '&path=' + encodeURIComponent(path) : '';
-    if (/\/d\/[a-f0-9]{64}\/?$/i.test(String(window.location.pathname || ''))) {
-      return '/d/' + encodeURIComponent(token) + (passParam || p ? '?' : '')
-        + (passParam ? passParam.slice(1) : '')
-        + (passParam && p ? '&' : '')
-        + (p ? p.slice(1) : '');
-    }
     return withBasePath('/api/folder/shareFolder.php?token=' + encodeURIComponent(token) + passParam + p);
   }
 

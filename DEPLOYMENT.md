@@ -22,7 +22,10 @@ The compose definition intentionally uses `CHOWN_ON_START=false`: startup leaves
 
 ## Security behavior
 
-- 256-bit unguessable drop tokens.
+- New sender URLs use a four-letter alias such as `https://drop.phaise.com/ynei` plus a separately generated eight-character access code. The access code is shown once to the administrator and only its password hash is stored.
+- The four-letter alias is not trusted as a secret: the server resolves it to an internal 256-bit token, requires an unlocked server-side session for uploads and Finish, and never puts the access code in the URL.
+- Access-code attempts are limited to 8 per source IP and drop per 15 minutes, with a 60-attempt global ceiling per drop. Verification fails closed if the attempt ledger cannot be locked or persisted.
+- Existing 256-bit `/d/<token>` links remain compatible.
 - No file listing on a drop link.
 - Default limits exposed in the admin dialog: 25 GB per file, 100 GB total, 48-hour idle timeout, 7-day hard expiry.
 - Total-byte reservations are serialized under a file lock to prevent concurrent quota bypass.

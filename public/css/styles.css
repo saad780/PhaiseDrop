@@ -4694,6 +4694,25 @@ body.dark-mode .fr-enc-text{
   align-items: center;
 }
 
+.phaise-drop-code {
+  max-width: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.phaise-drop-invite-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.phaise-drop-invite-actions small {
+  line-height: 1.35;
+}
+
 .phaise-drop-actions {
   justify-content: flex-end;
   margin-top: 20px;
@@ -4709,6 +4728,15 @@ body.dark-mode .fr-enc-text{
   }
 
   .phaise-drop-link-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .phaise-drop-code {
+    max-width: none;
+  }
+
+  .phaise-drop-invite-actions {
     align-items: stretch;
     flex-direction: column;
   }

@@ -41,6 +41,10 @@ class FolderController
     private const SHARE_DAILY_STATE_KEEP_DAYS = 14;
     private const SHARE_UPLOAD_LOG_MAX_BYTES = 5242880;
     private const SHARE_UPLOAD_LOG_MAX_FILES = 3;
+    private const DROP_UNLOCK_WINDOW_SECONDS = 900;
+    private const DROP_UNLOCK_MAX_PER_IP = 8;
+    private const DROP_UNLOCK_MAX_PER_TOKEN = 60;
+    private const DROP_UNLOCK_SESSION_SECONDS = 28800;
 
     private ?array $jsonBodyOverride = null;
 
@@ -137,6 +141,164 @@ class FolderController
         return substr(hash('sha256', $token), 0, 24);
     }
 
+    private static function generateDropAccessCode(): array
+    {
+        $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        $raw = '';
+        for ($i = 0; $i < 8; $i++) {
+            $raw .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+        }
+        return [
+            'raw' => $raw,
+            'display' => substr($raw, 0, 4) . '-' . substr($raw, 4),
+        ];
+    }
+
+    private static function normalizeDropAccessCode(string $value): string
+    {
+        $normalized = strtoupper((string)preg_replace('/[^A-Za-z0-9]/', '', $value));
+        return preg_match('/^[A-HJ-NP-Z2-9]{8}$/', $normalized) ? $normalized : '';
+    }
+
+    private static function isAccessCodeDropRecord(array $record): bool
+    {
+        return (($record['mode'] ?? '') === 'drop')
+            && !empty($record['accessCodeRequired'])
+            && preg_match('/^[a-z]{4}$/', (string)($record['shortCode'] ?? ''))
+            && !empty($record['password']);
+    }
+
+    private static function dropUnlockSessionKey(string $token): string
+    {
+        return hash('sha256', 'phaise-drop-unlock|' . $token);
+    }
+
+    private static function isDropSessionUnlocked(string $token): bool
+    {
+        self::ensureSession();
+        $key = self::dropUnlockSessionKey($token);
+        $unlocks = isset($_SESSION['phaise_drop_unlocks']) && is_array($_SESSION['phaise_drop_unlocks'])
+            ? $_SESSION['phaise_drop_unlocks']
+            : [];
+        $expires = isset($unlocks[$key]) && is_numeric($unlocks[$key]) ? (int)$unlocks[$key] : 0;
+        if ($expires <= time()) {
+            if (isset($_SESSION['phaise_drop_unlocks'][$key])) {
+                unset($_SESSION['phaise_drop_unlocks'][$key]);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static function grantDropSessionUnlock(string $token): void
+    {
+        self::ensureSession();
+        if (!isset($_SESSION['phaise_drop_unlocks']) || !is_array($_SESSION['phaise_drop_unlocks'])) {
+            $_SESSION['phaise_drop_unlocks'] = [];
+        }
+        $_SESSION['phaise_drop_unlocks'][self::dropUnlockSessionKey($token)] = time() + self::DROP_UNLOCK_SESSION_SECONDS;
+    }
+
+    private static function applyDropUnlockAttemptLimit(string $token, string $ip): ?array
+    {
+        $path = rtrim(self::getShareStateDir(), '/\\') . DIRECTORY_SEPARATOR . 'unlock_attempts.json';
+        $now = time();
+        $cutoff = $now - self::DROP_UNLOCK_WINDOW_SECONDS;
+        $tokenKey = hash('sha256', $token);
+        $ipKey = $tokenKey . '|' . hash('sha256', $ip);
+        $decision = ['ok' => true, 'retryAfter' => 0];
+
+        $persisted = self::withLockedJsonState($path, function (array $state) use ($now, $cutoff, $tokenKey, $ipKey, &$decision) {
+            $byIp = isset($state['byIp']) && is_array($state['byIp']) ? $state['byIp'] : [];
+            $byToken = isset($state['byToken']) && is_array($state['byToken']) ? $state['byToken'] : [];
+            foreach ([$byIp, $byToken] as $bucketIndex => $bucket) {
+                foreach ($bucket as $key => $events) {
+                    if (!is_array($events)) {
+                        unset($bucket[$key]);
+                        continue;
+                    }
+                    $events = array_values(array_filter($events, static fn($ts) => is_numeric($ts) && (int)$ts >= $cutoff));
+                    if ($events) {
+                        $bucket[$key] = $events;
+                    } else {
+                        unset($bucket[$key]);
+                    }
+                }
+                if ($bucketIndex === 0) {
+                    $byIp = $bucket;
+                } else {
+                    $byToken = $bucket;
+                }
+            }
+
+            $ipEvents = $byIp[$ipKey] ?? [];
+            $tokenEvents = $byToken[$tokenKey] ?? [];
+            if (count($ipEvents) >= self::DROP_UNLOCK_MAX_PER_IP || count($tokenEvents) >= self::DROP_UNLOCK_MAX_PER_TOKEN) {
+                $events = count($ipEvents) >= self::DROP_UNLOCK_MAX_PER_IP ? $ipEvents : $tokenEvents;
+                $oldest = $events ? min(array_map(static fn($ts) => (int)$ts, $events)) : $now;
+                $decision = [
+                    'ok' => false,
+                    'retryAfter' => max(1, self::DROP_UNLOCK_WINDOW_SECONDS - max(0, $now - $oldest)),
+                ];
+            } else {
+                $ipEvents[] = $now;
+                $tokenEvents[] = $now;
+                $byIp[$ipKey] = $ipEvents;
+                $byToken[$tokenKey] = $tokenEvents;
+            }
+            return ['byIp' => $byIp, 'byToken' => $byToken];
+        });
+
+        if (!$persisted) {
+            return [
+                'error' => 'Access-code verification is temporarily unavailable. Please try again shortly.',
+                'retryAfter' => 30,
+                'status' => 503,
+            ];
+        }
+
+        if (empty($decision['ok'])) {
+            return [
+                'error' => 'Too many access-code attempts. Please wait and try again.',
+                'retryAfter' => max(1, (int)($decision['retryAfter'] ?? 1)),
+                'status' => 429,
+            ];
+        }
+        return null;
+    }
+
+    private static function renderDropAccessPrompt(string $shortCode, string $error = '', int $status = 200): void
+    {
+        http_response_code($status);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Frame-Options: DENY');
+        header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self';");
+        header('Content-Type: text/html; charset=utf-8');
+        $action = htmlspecialchars(fr_with_base_path('/' . $shortCode), ENT_QUOTES, 'UTF-8');
+        $logo = htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $css = htmlspecialchars(fr_with_base_path('/css/share.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $fonts = htmlspecialchars(fr_with_base_path('/css/vendor/roboto.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $errorHtml = $error !== ''
+            ? '<div class="fr-share-error" role="alert">' . htmlspecialchars($error, ENT_QUOTES, 'UTF-8') . '</div>'
+            : '';
+        echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+            . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            . '<title>Unlock secure drop</title><link rel="stylesheet" href="' . $fonts . '">'
+            . '<link rel="stylesheet" href="' . $css . '"></head><body class="fr-share-body">'
+            . '<div class="fr-share-shell"><div class="fr-share-card"><div class="fr-share-card-header">'
+            . '<img class="fr-share-logo" src="' . $logo . '" alt="Phaise Drop"><div>'
+            . '<div class="fr-share-title">Secure file drop</div>'
+            . '<div class="fr-share-subtitle">Enter the access code from the person who sent this link.</div>'
+            . '</div></div>' . $errorHtml
+            . '<form class="fr-share-form" method="post" action="' . $action . '">'
+            . '<label for="access_code" class="fr-share-label">Access code</label>'
+            . '<input type="text" name="access_code" id="access_code" class="fr-share-input" '
+            . 'placeholder="ABCD-EFGH" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>'
+            . '<button type="submit" class="fr-share-btn">Unlock</button></form></div></div></body></html>';
+        exit;
+    }
+
     private static function defaultSharedAllowedTypes(): array
     {
         return [
@@ -219,16 +381,18 @@ class FolderController
         return $dir;
     }
 
-    private static function withLockedJsonState(string $path, callable $mutator): void
+    private static function withLockedJsonState(string $path, callable $mutator): bool
     {
         $fp = @fopen($path, 'c+');
         if ($fp === false) {
-            return;
+            return false;
         }
+        $locked = false;
         try {
             if (!@flock($fp, LOCK_EX)) {
-                return;
+                return false;
             }
+            $locked = true;
             $raw = stream_get_contents($fp);
             $state = [];
             if (is_string($raw) && trim($raw) !== '') {
@@ -241,12 +405,19 @@ class FolderController
             if (!is_array($next)) {
                 $next = $state;
             }
-            @ftruncate($fp, 0);
-            @rewind($fp);
-            @fwrite($fp, json_encode($next, JSON_PRETTY_PRINT));
-            @fflush($fp);
-            @flock($fp, LOCK_UN);
+            $encoded = json_encode($next, JSON_PRETTY_PRINT);
+            if (!is_string($encoded)
+                || !@ftruncate($fp, 0)
+                || !@rewind($fp)
+                || @fwrite($fp, $encoded) !== strlen($encoded)
+                || !@fflush($fp)) {
+                return false;
+            }
+            return true;
         } finally {
+            if ($locked) {
+                @flock($fp, LOCK_UN);
+            }
             @fclose($fp);
         }
     }
@@ -2291,22 +2462,71 @@ class FolderController
     /* -------------------- Public Shared Folder HTML -------------------- */
     public function shareFolder(): void
     {
-        $token        = self::getQueryString('token');
-        $providedPass = self::getQueryString('pass');
-        $page         = self::getQueryInt('page');
-        $path         = (string)($_GET['path'] ?? '');
+        $reference = self::getQueryString('token');
+        $page = self::getQueryInt('page');
+        $path = (string)($_GET['path'] ?? '');
         if ($page === null || $page < 1) {
             $page = 1;
         }
 
-        if (empty($token)) {
+        if ($reference === '') {
             http_response_code(400);
             header('Content-Type: application/json');
             echo json_encode(["error" => "Missing token."]);
             exit;
         }
 
-        $data = FolderModel::getSharedFolderData($token, $providedPass, $page, 10, $path);
+        $resolvedToken = FolderModel::resolveShareFolderReference($reference);
+        $token = $resolvedToken ?? $reference;
+        $recordForUnlock = $resolvedToken !== null ? FolderModel::getShareFolderRecord($resolvedToken) : null;
+        $isAccessCodeDrop = is_array($recordForUnlock) && self::isAccessCodeDropRecord($recordForUnlock);
+        $passwordVerified = false;
+        $providedPass = $isAccessCodeDrop ? '' : self::getQueryString('pass');
+        $data = null;
+
+        if ($isAccessCodeDrop) {
+            // Closed/expired/missing destinations should report their terminal state
+            // without asking the recipient for a code first.
+            $preflight = FolderModel::getSharedFolderData($token, null, $page, 10, $path, true);
+            if (isset($preflight['error'])) {
+                $data = $preflight;
+            } else {
+                $shortCode = (string)$recordForUnlock['shortCode'];
+                $unlocked = self::isDropSessionUnlocked($token);
+                if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+                    if ($unlocked) {
+                        header('Location: ' . fr_with_base_path('/' . $shortCode), true, 303);
+                        exit;
+                    }
+                    $limit = self::applyDropUnlockAttemptLimit($token, self::detectSharedClientIp());
+                    if ($limit !== null) {
+                        header('Retry-After: ' . max(1, (int)($limit['retryAfter'] ?? 1)));
+                        self::renderDropAccessPrompt(
+                            $shortCode,
+                            (string)$limit['error'],
+                            (int)($limit['status'] ?? 429)
+                        );
+                    }
+                    $submitted = isset($_POST['access_code']) && !is_array($_POST['access_code'])
+                        ? self::normalizeDropAccessCode((string)$_POST['access_code'])
+                        : '';
+                    if ($submitted === '' || !password_verify($submitted, (string)$recordForUnlock['password'])) {
+                        self::renderDropAccessPrompt($shortCode, 'That access code is not valid.', 403);
+                    }
+                    self::grantDropSessionUnlock($token);
+                    header('Location: ' . fr_with_base_path('/' . $shortCode), true, 303);
+                    exit;
+                }
+                if (!$unlocked) {
+                    self::renderDropAccessPrompt($shortCode);
+                }
+                $passwordVerified = true;
+            }
+        }
+
+        if (!is_array($data)) {
+            $data = FolderModel::getSharedFolderData($token, $providedPass, $page, 10, $path, $passwordVerified);
+        }
 
         if (isset($data['needs_password']) && $data['needs_password'] === true) {
             header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -2668,6 +2888,7 @@ class FolderController
     public function createDrop(): void
     {
         header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
         self::requireAuth();
         self::requireAdmin();
         self::requireCsrf();
@@ -2721,9 +2942,10 @@ class FolderController
         $safeTitle = mb_substr($safeTitle, 0, 80);
         try {
             $suffix = bin2hex(random_bytes(3));
+            $accessCode = self::generateDropAccessCode();
         } catch (Throwable $e) {
             http_response_code(500);
-            echo json_encode(['error' => 'Could not generate a drop identifier.']);
+            echo json_encode(['error' => 'Could not generate secure drop credentials.']);
             exit;
         }
         $folderName = 'Drop ' . gmdate('Y-m-d') . ' - ' . $safeTitle . ' - ' . $suffix;
@@ -2739,11 +2961,13 @@ class FolderController
         $share = FolderModel::createShareFolderLink(
             $folder,
             $expiresDays * 86400,
-            '',
+            (string)$accessCode['raw'],
             1,
             1,
             [
                 'mode' => 'drop',
+                'shortCode' => 1,
+                'accessCodeRequired' => 1,
                 'hideListing' => 1,
                 'preserveFolderStructure' => 1,
                 'maxFileSizeMb' => $maxFileSizeMb,
@@ -2779,7 +3003,8 @@ class FolderController
         echo json_encode([
             'success' => true,
             'folder' => $folder,
-            'token' => $share['token'],
+            'shortCode' => $share['shortCode'],
+            'accessCode' => $accessCode['display'],
             'link' => $share['link'],
             'expires' => $share['expires'],
             'closeMode' => $closeMode,
@@ -3001,7 +3226,11 @@ class FolderController
             }
         }
 
-        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath);
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        $passwordVerified = is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && self::isDropSessionUnlocked($token);
+        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath, $passwordVerified);
         if (isset($ctx['needs_password'])) {
             $respondError(403, "Password required.");
         }
@@ -3255,7 +3484,11 @@ class FolderController
             exit;
         }
 
-        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath);
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        $passwordVerified = is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && self::isDropSessionUnlocked($token);
+        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath, $passwordVerified);
         if (!empty($ctx['error']) || !empty($ctx['needs_password'])) {
             http_response_code(403);
             header('Content-Type: application/json; charset=utf-8');
@@ -3300,6 +3533,16 @@ class FolderController
             http_response_code(400);
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(['error' => 'Invalid drop token.']);
+            exit;
+        }
+
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        if (is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && !self::isDropSessionUnlocked($token)) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Access code required.']);
             exit;
         }
 

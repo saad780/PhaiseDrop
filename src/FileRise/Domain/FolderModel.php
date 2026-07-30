@@ -2361,6 +2361,9 @@ class FolderModel
         }
 
         $record['mode'] = $mode;
+        $shortCode = strtolower(trim((string)($record['shortCode'] ?? '')));
+        $record['shortCode'] = preg_match('/^[a-z]{4}$/', $shortCode) ? $shortCode : '';
+        $record['accessCodeRequired'] = self::boolFromMixed($record['accessCodeRequired'] ?? false) ? 1 : 0;
         $record['allowUpload'] = $allowUpload;
         $record['hideListing'] = $hideListing ? 1 : 0;
         $record['aiEnabled'] = $aiEnabled ? 1 : 0;
@@ -2672,6 +2675,67 @@ class FolderModel
         return self::findShareFolderRecord($token);
     }
 
+    /**
+     * Resolve either an internal 256-bit share token or a four-letter public
+     * drop code to the internal token. Public aliases are only presentation;
+     * all upload state continues to be keyed by the unguessable token.
+     */
+    public static function resolveShareFolderReference(string $reference): ?string
+    {
+        $reference = trim($reference);
+        if (preg_match('/^[a-f0-9]{64}$/', $reference)) {
+            return self::findShareFolderRecord($reference) ? $reference : null;
+        }
+        if (!preg_match('/^[a-z]{4}$/', $reference)) {
+            return null;
+        }
+
+        $readAlias = function (string $path, string $alias): ?string {
+            if (!is_file($path)) {
+                return null;
+            }
+            $links = json_decode((string)@file_get_contents($path), true);
+            if (!is_array($links)) {
+                return null;
+            }
+            foreach ($links as $token => $record) {
+                if (!preg_match('/^[a-f0-9]{64}$/', (string)$token) || !is_array($record)) {
+                    continue;
+                }
+                $normalized = self::normalizeShareFolderRecord($record);
+                if (($normalized['shortCode'] ?? '') === $alias) {
+                    return (string)$token;
+                }
+            }
+            return null;
+        };
+
+        $currentId = class_exists('SourceContext') ? SourceContext::getActiveId() : '';
+        $token = $readAlias(self::metaRoot() . 'share_folder_links.json', $reference);
+        if ($token !== null) {
+            return $token;
+        }
+        if (!class_exists('SourceContext') || !SourceContext::sourcesEnabled()) {
+            return null;
+        }
+
+        foreach (SourceContext::listAllSources() as $source) {
+            if (isset($source['enabled']) && !$source['enabled']) {
+                continue;
+            }
+            $id = (string)($source['id'] ?? '');
+            if ($id === '' || $id === $currentId) {
+                continue;
+            }
+            $token = $readAlias(SourceContext::metaRootForId($id) . 'share_folder_links.json', $reference);
+            if ($token !== null) {
+                SourceContext::setActiveId($id, false);
+                return $token;
+            }
+        }
+        return null;
+    }
+
     private static function normalizeShareSubPath(string $raw): array
     {
         $path = str_replace('\\', '/', trim((string)$raw));
@@ -2805,7 +2869,13 @@ class FolderModel
         return array_merge($folders, $files);
     }
 
-    private static function resolveSharedFolderContext(string $token, ?string $providedPass, string $subPath = '', bool $includeEntries = true): array
+    private static function resolveSharedFolderContext(
+        string $token,
+        ?string $providedPass,
+        string $subPath = '',
+        bool $includeEntries = true,
+        bool $passwordVerified = false
+    ): array
     {
         $record = self::findShareFolderRecord($token);
         if (!$record) {
@@ -2817,10 +2887,10 @@ class FolderModel
             return ["error" => $closedReason, "closed" => true];
         }
 
-        if (!empty($record['password']) && empty($providedPass)) {
+        if (!$passwordVerified && !empty($record['password']) && empty($providedPass)) {
             return ["needs_password" => true];
         }
-        if (!empty($record['password']) && !password_verify($providedPass, $record['password'])) {
+        if (!$passwordVerified && !empty($record['password']) && !password_verify($providedPass, $record['password'])) {
             return ["error" => "Invalid password."];
         }
 
@@ -2914,9 +2984,16 @@ class FolderModel
     /**
      * Retrieves shared folder data based on a share token.
      */
-    public static function getSharedFolderData(string $token, ?string $providedPass, int $page = 1, int $itemsPerPage = 10, string $subPath = ''): array
+    public static function getSharedFolderData(
+        string $token,
+        ?string $providedPass,
+        int $page = 1,
+        int $itemsPerPage = 10,
+        string $subPath = '',
+        bool $passwordVerified = false
+    ): array
     {
-        $ctx = self::resolveSharedFolderContext($token, $providedPass, $subPath);
+        $ctx = self::resolveSharedFolderContext($token, $providedPass, $subPath, true, $passwordVerified);
         if (isset($ctx['error']) || isset($ctx['needs_password'])) {
             return $ctx;
         }
@@ -2944,9 +3021,14 @@ class FolderModel
         return $ctx;
     }
 
-    public static function getSharedUploadContext(string $token, ?string $providedPass, string $subPath = ''): array
+    public static function getSharedUploadContext(
+        string $token,
+        ?string $providedPass,
+        string $subPath = '',
+        bool $passwordVerified = false
+    ): array
     {
-        $ctx = self::resolveSharedFolderContext($token, $providedPass, $subPath, false);
+        $ctx = self::resolveSharedFolderContext($token, $providedPass, $subPath, false, $passwordVerified);
         if (isset($ctx['error']) || isset($ctx['needs_password'])) {
             return $ctx;
         }
@@ -3022,9 +3104,17 @@ class FolderModel
         $createdAt = isset($options['createdAt']) && is_numeric($options['createdAt'])
             ? max(0, (int)$options['createdAt'])
             : time();
+        $useShortCode = ($mode === 'drop') && self::boolFromMixed($options['shortCode'] ?? false);
+        $accessCodeRequired = self::boolFromMixed($options['accessCodeRequired'] ?? false);
+        if ($useShortCode && (!$accessCodeRequired || $password === '')) {
+            return ["error" => "Short drop links require an access code."];
+        }
 
         $expires       = time() + max(1, $expirationSeconds);
         $hashedPassword = $password !== "" ? password_hash($password, PASSWORD_DEFAULT) : "";
+        if ($password !== "" && (!is_string($hashedPassword) || $hashedPassword === '')) {
+            return ["error" => "Could not protect the share access code."];
+        }
 
         $record = [
             "folder"      => $relative,
@@ -3033,6 +3123,8 @@ class FolderModel
             "allowUpload" => $allowUpload ? 1 : 0,
             "allowSubfolders" => $allowSubfolders ? 1 : 0,
             "mode" => $mode,
+            "shortCode" => '',
+            "accessCodeRequired" => $accessCodeRequired ? 1 : 0,
             "hideListing" => $hideListing ? 1 : 0,
             "aiEnabled" => $aiEnabled ? 1 : 0,
             "preserveFolderStructure" => $preserveFolderStructure ? 1 : 0,
@@ -3055,15 +3147,77 @@ class FolderModel
             "createdAt" => $createdAt,
         ];
 
-        $saved = self::withLockedShareLinks(function (array $links) use ($token, $record): array {
+        $saved = self::withLockedShareLinks(function (array $links) use ($token, $record, $useShortCode): array {
             $now = time();
             foreach ($links as $key => $value) {
                 if (!empty($value['expires']) && (int)$value['expires'] < $now) {
                     unset($links[$key]);
                 }
             }
-            $links[$token] = $record;
-            return ['links' => $links, 'result' => ['success' => true]];
+
+            $nextRecord = $record;
+            $shortCode = '';
+            if ($useShortCode) {
+                $occupied = [];
+                foreach ($links as $value) {
+                    if (!is_array($value)) {
+                        continue;
+                    }
+                    $candidate = strtolower(trim((string)($value['shortCode'] ?? '')));
+                    if (preg_match('/^[a-z]{4}$/', $candidate)) {
+                        $occupied[$candidate] = true;
+                    }
+                }
+                if (class_exists('SourceContext') && SourceContext::sourcesEnabled()) {
+                    $currentSourceId = SourceContext::getActiveId();
+                    foreach (SourceContext::listAllSources() as $source) {
+                        if (isset($source['enabled']) && !$source['enabled']) {
+                            continue;
+                        }
+                        $sourceId = (string)($source['id'] ?? '');
+                        if ($sourceId === '' || $sourceId === $currentSourceId) {
+                            continue;
+                        }
+                        $sourceLinks = json_decode((string)@file_get_contents(
+                            SourceContext::metaRootForId($sourceId) . 'share_folder_links.json'
+                        ), true);
+                        if (!is_array($sourceLinks)) {
+                            continue;
+                        }
+                        foreach ($sourceLinks as $sourceRecord) {
+                            if (!is_array($sourceRecord)
+                                || (!empty($sourceRecord['expires']) && (int)$sourceRecord['expires'] < $now)) {
+                                continue;
+                            }
+                            $candidate = strtolower(trim((string)($sourceRecord['shortCode'] ?? '')));
+                            if (preg_match('/^[a-z]{4}$/', $candidate)) {
+                                $occupied[$candidate] = true;
+                            }
+                        }
+                    }
+                }
+                $alphabet = 'abcdefghijklmnopqrstuvwxyz';
+                for ($attempt = 0; $attempt < 128 && $shortCode === ''; $attempt++) {
+                    $candidate = '';
+                    try {
+                        for ($i = 0; $i < 4; $i++) {
+                            $candidate .= $alphabet[random_int(0, 25)];
+                        }
+                    } catch (\Throwable $e) {
+                        return ['links' => $links, 'result' => ['error' => 'Could not generate a short drop code.']];
+                    }
+                    if (!isset($occupied[$candidate])) {
+                        $shortCode = $candidate;
+                    }
+                }
+                if ($shortCode === '') {
+                    return ['links' => $links, 'result' => ['error' => 'Could not allocate a short drop code.']];
+                }
+                $nextRecord['shortCode'] = $shortCode;
+            }
+
+            $links[$token] = $nextRecord;
+            return ['links' => $links, 'result' => ['success' => true, 'shortCode' => $shortCode]];
         });
         if (empty($saved['success'])) {
             return ["error" => (string)($saved['error'] ?? "Could not save share link.")];
@@ -3075,18 +3229,25 @@ class FolderModel
         $scheme  = $https ? 'https' : 'http';
         $host    = $_SERVER['HTTP_HOST'] ?? gethostbyname(gethostname());
         $publishedBase = defined('FR_PUBLISHED_URL_EFFECTIVE') ? trim((string)FR_PUBLISHED_URL_EFFECTIVE) : '';
+        $shortCode = (string)($saved['shortCode'] ?? '');
         if ($publishedBase !== '') {
             $link = rtrim($publishedBase, '/') . ($mode === 'drop'
-                ? "/d/" . rawurlencode($token)
+                ? ($shortCode !== '' ? "/" . rawurlencode($shortCode) : "/d/" . rawurlencode($token))
                 : "/api/folder/shareFolder.php?token=" . urlencode($token));
         } else {
             $baseUrl = $scheme . '://' . rtrim($host, '/');
             $link = $baseUrl . fr_with_base_path($mode === 'drop'
-                ? "/d/" . rawurlencode($token)
+                ? ($shortCode !== '' ? "/" . rawurlencode($shortCode) : "/d/" . rawurlencode($token))
                 : "/api/folder/shareFolder.php?token=" . urlencode($token));
         }
 
-        return ["token" => $token, "expires" => $expires, "link" => $link, "mode" => $mode];
+        return [
+            "token" => $token,
+            "shortCode" => $shortCode,
+            "expires" => $expires,
+            "link" => $link,
+            "mode" => $mode,
+        ];
     }
 
     /**

@@ -94,7 +94,128 @@ try {
     phaiseDropFailIf(!preg_match('/^[a-f0-9]{64}$/', $token), 'drop token is not 256-bit lowercase hex', $errors);
     phaiseDropFailIf(
         (string)($share['link'] ?? '') !== 'https://drop.example.test/d/' . $token,
-        'drop did not use the short public capability URL',
+        'legacy drop did not keep its 256-bit capability URL',
+        $errors
+    );
+
+    $unprotectedShort = \FileRise\Domain\FolderModel::createShareFolderLink(
+        'Drop test',
+        604800,
+        '',
+        1,
+        1,
+        ['mode' => 'drop', 'shortCode' => 1, 'accessCodeRequired' => 1]
+    );
+    phaiseDropFailIf(
+        empty($unprotectedShort['error']),
+        'a four-letter drop link must not be created without an access code',
+        $errors
+    );
+
+    $shortShare = \FileRise\Domain\FolderModel::createShareFolderLink(
+        'Drop test',
+        604800,
+        'ABCDEFGH',
+        1,
+        1,
+        [
+            'mode' => 'drop',
+            'shortCode' => 1,
+            'accessCodeRequired' => 1,
+            'closeMode' => 'window',
+        ]
+    );
+    phaiseDropFailIf(isset($shortShare['error']), 'short drop creation failed: ' . ($shortShare['error'] ?? ''), $errors);
+    $shortToken = (string)($shortShare['token'] ?? '');
+    $shortCode = (string)($shortShare['shortCode'] ?? '');
+    phaiseDropFailIf(!preg_match('/^[a-f0-9]{64}$/', $shortToken), 'short drop lost its internal 256-bit token', $errors);
+    phaiseDropFailIf(!preg_match('/^[a-z]{4}$/', $shortCode), 'short drop did not receive a four-letter alias', $errors);
+    phaiseDropFailIf(
+        (string)($shortShare['link'] ?? '') !== 'https://drop.example.test/' . $shortCode,
+        'short drop did not use the root-level four-letter URL',
+        $errors
+    );
+    phaiseDropFailIf(
+        \FileRise\Domain\FolderModel::resolveShareFolderReference($shortCode) !== $shortToken,
+        'four-letter alias did not resolve to its internal token',
+        $errors
+    );
+    phaiseDropFailIf(
+        empty(\FileRise\Domain\FolderModel::getSharedUploadContext($shortToken, null)['needs_password']),
+        'short drop did not require its access code',
+        $errors
+    );
+    phaiseDropFailIf(
+        empty(\FileRise\Domain\FolderModel::getSharedUploadContext($shortToken, 'WRONG234')['error']),
+        'short drop accepted an incorrect access code',
+        $errors
+    );
+    phaiseDropFailIf(
+        isset(\FileRise\Domain\FolderModel::getSharedUploadContext($shortToken, 'ABCDEFGH')['error']),
+        'short drop rejected its correct access code',
+        $errors
+    );
+    phaiseDropFailIf(
+        isset(\FileRise\Domain\FolderModel::getSharedUploadContext($shortToken, null, '', true)['error']),
+        'server-verified short-drop session could not access its upload context',
+        $errors
+    );
+
+    $secondShortShare = \FileRise\Domain\FolderModel::createShareFolderLink(
+        'Drop test',
+        604800,
+        '23456789',
+        1,
+        1,
+        ['mode' => 'drop', 'shortCode' => 1, 'accessCodeRequired' => 1, 'closeMode' => 'window']
+    );
+    phaiseDropFailIf(
+        (string)($secondShortShare['shortCode'] ?? '') === $shortCode,
+        'active four-letter aliases must be unique',
+        $errors
+    );
+
+    $normalizeCode = new ReflectionMethod(\FileRise\Http\Controllers\FolderController::class, 'normalizeDropAccessCode');
+    $normalizeCode->setAccessible(true);
+    phaiseDropFailIf(
+        $normalizeCode->invoke(null, 'abcd-efgh') !== 'ABCDEFGH',
+        'access-code normalization should accept lowercase and separators',
+        $errors
+    );
+    phaiseDropFailIf(
+        $normalizeCode->invoke(null, 'ABCD-0FGH') !== '',
+        'access-code normalization should reject ambiguous characters',
+        $errors
+    );
+
+    $unlockLimit = new ReflectionMethod(\FileRise\Http\Controllers\FolderController::class, 'applyDropUnlockAttemptLimit');
+    $unlockLimit->setAccessible(true);
+    for ($attempt = 1; $attempt <= 8; $attempt++) {
+        phaiseDropFailIf(
+            $unlockLimit->invoke(null, $shortToken, '203.0.113.44') !== null,
+            'access-code limiter rejected an attempt before the per-IP threshold',
+            $errors
+        );
+    }
+    $limited = $unlockLimit->invoke(null, $shortToken, '203.0.113.44');
+    phaiseDropFailIf(
+        !is_array($limited) || (int)($limited['status'] ?? 0) !== 429,
+        'access-code limiter did not block the ninth attempt in its window',
+        $errors
+    );
+
+    $secondShortToken = (string)($secondShortShare['token'] ?? '');
+    for ($attempt = 1; $attempt <= 60; $attempt++) {
+        phaiseDropFailIf(
+            $unlockLimit->invoke(null, $secondShortToken, '198.51.100.' . $attempt) !== null,
+            'access-code limiter rejected an attempt before the per-drop threshold',
+            $errors
+        );
+    }
+    $globallyLimited = $unlockLimit->invoke(null, $secondShortToken, '198.51.100.200');
+    phaiseDropFailIf(
+        !is_array($globallyLimited) || (int)($globallyLimited['status'] ?? 0) !== 429,
+        'access-code limiter did not enforce the global per-drop ceiling',
         $errors
     );
 

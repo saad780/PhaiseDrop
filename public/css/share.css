@@ -862,6 +862,15 @@ body.fr-share-ai-modal-open {
   font-size: 0.95rem;
 }
 
+.fr-share-error {
+  margin: 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.45);
+  border-radius: 8px;
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
 .fr-share-alert {
   padding: 10px 12px;
   border-radius: 10px;
