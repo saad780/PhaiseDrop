@@ -194,6 +194,45 @@ class UploadModel
         return $fileName;
     }
 
+    private static function clientModifiedTimestamp(array $post): ?int
+    {
+        $raw = $post['clientModifiedAtMs'] ?? null;
+        if (!is_scalar($raw)) {
+            return null;
+        }
+
+        $raw = trim((string)$raw);
+        if (!preg_match('/^[0-9]{4,16}$/', $raw)) {
+            return null;
+        }
+
+        $seconds = intdiv((int)$raw, 1000);
+        if ($seconds < 1 || $seconds > (time() + 86400)) {
+            return null;
+        }
+
+        return $seconds;
+    }
+
+    private static function applyClientModifiedTime(string $targetPath, array $post): void
+    {
+        $timestamp = self::clientModifiedTimestamp($post);
+        if ($timestamp === null || !is_file($targetPath) || is_link($targetPath)) {
+            return;
+        }
+        if (!self::isPathWithinRoot($targetPath, self::uploadRoot())) {
+            return;
+        }
+
+        $accessedAt = @fileatime($targetPath);
+        if ($accessedAt === false) {
+            $accessedAt = time();
+        }
+        if (!@touch($targetPath, $timestamp, $accessedAt)) {
+            error_log('Unable to preserve uploaded file modification time.');
+        }
+    }
+
     private static function metadataFileForFolder(string $folder): string
     {
         $folder = ACL::normalizeFolder($folder);
@@ -1084,6 +1123,8 @@ class UploadModel
                     }
                     return ['error' => $msg];
                 }
+
+                self::applyClientModifiedTime($targetPath, $post);
             }
 
             if (!$isLocal) {
@@ -1289,6 +1330,8 @@ class UploadModel
                         }
                         return ['error' => $msg];
                     }
+
+                    self::applyClientModifiedTime($targetPath, $post);
                 }
 
                 if (!$isLocal) {

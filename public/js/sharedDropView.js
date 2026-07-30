@@ -326,6 +326,13 @@ document.addEventListener('DOMContentLoaded', async function () {
     formData.append('response', 'json');
   }
 
+  function appendClientFileMetadata(formData, file) {
+    const lastModified = Number(file && file.lastModified);
+    if (Number.isFinite(lastModified) && lastModified > 0) {
+      formData.append('clientModifiedAtMs', String(Math.trunc(lastModified)));
+    }
+  }
+
   function xhrJson(url, formData, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -560,6 +567,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   async function uploadSingle(item) {
     const formData = new FormData();
     appendCommonFormData(formData);
+    appendClientFileMetadata(formData, item.file);
     const rel = getRelativePathForItem(item.file);
     if (rel !== item.file.name) {
       formData.append('relativePath', rel);
@@ -596,6 +604,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
       const formData = new FormData();
       appendCommonFormData(formData);
+      appendClientFileMetadata(formData, item.file);
       formData.append('resumableChunkNumber', String(index));
       formData.append('resumableTotalChunks', String(totalChunks));
       formData.append('resumableIdentifier', uploadId);

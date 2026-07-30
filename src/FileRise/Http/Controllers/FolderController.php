@@ -3335,6 +3335,9 @@ class FolderController
         $relativePath = '';
         $filesForModel = [];
         $requestParams = ['folder' => $targetFolder, 'source' => 'shared'];
+        if (isset($_POST['clientModifiedAtMs']) && is_scalar($_POST['clientModifiedAtMs'])) {
+            $requestParams['clientModifiedAtMs'] = (string)$_POST['clientModifiedAtMs'];
+        }
         $dropUploadId = '';
 
         if ($isChunkUpload) {
