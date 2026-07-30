@@ -53,6 +53,13 @@ require_once $baseDir . '/src/FileRise/Http/Controllers/FolderController.php';
 $errors = [];
 
 try {
+    $shareListEntrypoint = (string)file_get_contents($baseDir . '/public/api/folder/getShareFolderLinks.php');
+    phaiseDropFailIf(
+        strpos($shareListEntrypoint, 'getAllShareFolderLinks()') === false,
+        'shared-folder admin list endpoint is not wired to its controller method',
+        $errors
+    );
+
     $rulesMethod = new ReflectionMethod(\FileRise\Http\Controllers\FolderController::class, 'validateSharedUploadRules');
     $rulesMethod->setAccessible(true);
     phaiseDropFailIf(
