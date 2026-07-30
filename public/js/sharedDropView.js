@@ -33,7 +33,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     return;
   }
 
-  const token = String(payload.token || '');
+  const dropReference = String(payload.drop || payload.token || '');
   const shareRoot = String(payload.shareRoot || 'root');
   const currentPath = String(payload.path || '');
   const allowSubfolders = !!payload.allowSubfolders;
@@ -200,7 +200,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
     const passParam = pass ? '&pass=' + encodeURIComponent(pass) : '';
     const p = path ? '&path=' + encodeURIComponent(path) : '';
-    return withBasePath('/api/folder/shareFolder.php?token=' + encodeURIComponent(token) + passParam + p);
+    return withBasePath('/api/folder/shareFolder.php?token=' + encodeURIComponent(dropReference) + passParam + p);
   }
 
   function renderBreadcrumbs() {
@@ -312,11 +312,13 @@ document.addEventListener('DOMContentLoaded', async function () {
   }
 
   function appendCommonFormData(formData) {
+    const dropInput = form.querySelector('input[name="drop"]');
     const tokenInput = form.querySelector('input[name="token"]');
     const passInput = form.querySelector('input[name="pass"]');
     const pathInput = form.querySelector('input[name="path"]');
     const shareTokenInput = form.querySelector('input[name="share_upload_token"]');
 
+    if (dropInput && dropInput.value) formData.append('drop', dropInput.value);
     if (tokenInput && tokenInput.value) formData.append('token', tokenInput.value);
     if (passInput && passInput.value) formData.append('pass', passInput.value);
     if (pathInput && pathInput.value) formData.append('path', pathInput.value);
@@ -507,7 +509,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   async function makeStableChunkId(item) {
     const file = item.file;
     const seed = [
-      token,
+      dropReference,
       item.relativePath,
       file.name,
       String(file.size || 0),
@@ -529,11 +531,16 @@ document.addEventListener('DOMContentLoaded', async function () {
 
   async function getChunkStatus(uploadId, chunkNumber) {
     const params = new URLSearchParams();
+    const dropInput = form.querySelector('input[name="drop"]');
     const tokenInput = form.querySelector('input[name="token"]');
     const passInput = form.querySelector('input[name="pass"]');
     const pathInput = form.querySelector('input[name="path"]');
     const shareTokenInput = form.querySelector('input[name="share_upload_token"]');
-    params.set('token', tokenInput ? tokenInput.value : token);
+    if (dropInput && dropInput.value) {
+      params.set('drop', dropInput.value);
+    } else {
+      params.set('token', tokenInput ? tokenInput.value : dropReference);
+    }
     if (passInput && passInput.value) params.set('pass', passInput.value);
     if (pathInput && pathInput.value) params.set('path', pathInput.value);
     if (shareTokenInput && shareTokenInput.value) params.set('share_upload_token', shareTokenInput.value);

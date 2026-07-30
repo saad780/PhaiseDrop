@@ -5,11 +5,8 @@ document.addEventListener('DOMContentLoaded', function () {
   const closeBtn = document.getElementById('cancelCreateDrop');
   const submitBtn = document.getElementById('submitCreateDrop');
   const copyBtn = document.getElementById('copyDropLinkBtn');
-  const copyCodeBtn = document.getElementById('copyDropCodeBtn');
-  const copyInviteBtn = document.getElementById('copyDropInviteBtn');
   const result = document.getElementById('dropCreateResult');
   const linkInput = document.getElementById('dropCreatedLink');
-  const codeInput = document.getElementById('dropCreatedAccessCode');
   const folderHint = document.getElementById('dropCreatedFolder');
   if (!openBtn || !modal || !closeBtn || !submitBtn || !result || !linkInput) return;
 
@@ -37,7 +34,6 @@ document.addEventListener('DOMContentLoaded', function () {
   function resetResult() {
     result.hidden = true;
     linkInput.value = '';
-    if (codeInput) codeInput.value = '';
     if (folderHint) folderHint.textContent = '';
     submitBtn.hidden = false;
   }
@@ -99,11 +95,10 @@ document.addEventListener('DOMContentLoaded', function () {
         body: JSON.stringify(payload)
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body.link || !body.accessCode) {
+      if (!response.ok || !body.link || !/^[a-z]{4}$/.test(String(body.shortCode || ''))) {
         throw new Error(String(body.error || 'Could not create this drop.'));
       }
       linkInput.value = String(body.link);
-      if (codeInput) codeInput.value = String(body.accessCode);
       if (folderHint) folderHint.textContent = 'NAS folder: ' + String(body.folder || '');
       result.hidden = false;
       submitBtn.hidden = true;
@@ -132,31 +127,4 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  if (copyCodeBtn && codeInput) {
-    copyCodeBtn.addEventListener('click', async function () {
-      if (!codeInput.value) return;
-      try {
-        await navigator.clipboard.writeText(codeInput.value);
-        copyCodeBtn.textContent = 'Copied';
-        window.setTimeout(() => { copyCodeBtn.textContent = 'Copy'; }, 1500);
-      } catch (error) {
-        codeInput.select();
-        document.execCommand('copy');
-      }
-    });
-  }
-
-  if (copyInviteBtn && codeInput) {
-    copyInviteBtn.addEventListener('click', async function () {
-      if (!linkInput.value || !codeInput.value) return;
-      const invite = `Upload files here: ${linkInput.value}\nAccess code: ${codeInput.value}`;
-      try {
-        await navigator.clipboard.writeText(invite);
-        copyInviteBtn.textContent = 'Invite copied';
-        window.setTimeout(() => { copyInviteBtn.textContent = 'Copy link + code'; }, 1500);
-      } catch (error) {
-        notify('Could not copy automatically. Copy the link and code above.', 'warning');
-      }
-    });
-  }
 });

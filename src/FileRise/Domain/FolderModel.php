@@ -48,6 +48,138 @@ class FolderModel
         return rtrim((string)META_DIR, '/\\') . DIRECTORY_SEPARATOR;
     }
 
+    /**
+     * Four-letter drop codes live in one global namespace, even when storage
+     * sources keep their share records in separate metadata directories.
+     */
+    private static function shortCodeRegistryPath(): string
+    {
+        return rtrim((string)META_DIR, '/\\') . DIRECTORY_SEPARATOR . 'used_drop_codes.json';
+    }
+
+    private static function shareLinkMetadataPaths(): array
+    {
+        $paths = [
+            rtrim((string)META_DIR, '/\\') . DIRECTORY_SEPARATOR . 'share_folder_links.json',
+            self::metaRoot() . 'share_folder_links.json',
+        ];
+        if (class_exists('SourceContext') && SourceContext::sourcesEnabled()) {
+            foreach (SourceContext::listAllSources() as $source) {
+                $sourceId = trim((string)($source['id'] ?? ''));
+                if ($sourceId !== '') {
+                    $paths[] = SourceContext::metaRootForId($sourceId) . 'share_folder_links.json';
+                }
+            }
+        }
+        return array_values(array_unique($paths));
+    }
+
+    /**
+     * Allocate and permanently tombstone a public code before the share is
+     * written. A failed share write may burn a code, which is safer than ever
+     * assigning an old URL to a different recipient later.
+     */
+    private static function allocateShortDropCode(): array
+    {
+        $registryPath = self::shortCodeRegistryPath();
+        $registryDir = dirname($registryPath);
+        if (!is_dir($registryDir) && !@mkdir($registryDir, 0775, true) && !is_dir($registryDir)) {
+            return ['error' => 'Could not create the drop-code registry.'];
+        }
+
+        $lock = @fopen($registryPath . '.lock', 'c+');
+        if ($lock === false || !@flock($lock, LOCK_EX)) {
+            if (is_resource($lock)) {
+                @fclose($lock);
+            }
+            return ['error' => 'Could not lock the drop-code registry.'];
+        }
+
+        try {
+            $decoded = is_file($registryPath)
+                ? json_decode((string)@file_get_contents($registryPath), true)
+                : [];
+            $used = is_array($decoded['codes'] ?? null)
+                ? $decoded['codes']
+                : (is_array($decoded) ? $decoded : []);
+            foreach ($used as $code => $firstUsedAt) {
+                if (!is_string($code) || !preg_match('/^[a-z]{4}$/', $code)) {
+                    unset($used[$code]);
+                }
+            }
+
+            // Seed the permanent ledger from records created before the
+            // registry existed, including expired records and other sources.
+            foreach (self::shareLinkMetadataPaths() as $sharePath) {
+                if (!is_file($sharePath)) {
+                    continue;
+                }
+                $links = json_decode((string)@file_get_contents($sharePath), true);
+                if (!is_array($links)) {
+                    continue;
+                }
+                foreach ($links as $record) {
+                    if (!is_array($record)) {
+                        continue;
+                    }
+                    $code = strtolower(trim((string)($record['shortCode'] ?? '')));
+                    if (preg_match('/^[a-z]{4}$/', $code) && !isset($used[$code])) {
+                        $used[$code] = max(1, (int)($record['createdAt'] ?? time()));
+                    }
+                }
+            }
+
+            $capacity = 26 ** 4;
+            if (count($used) >= $capacity) {
+                return ['error' => 'All four-letter drop codes have been used.'];
+            }
+
+            try {
+                $offset = random_int(0, $capacity - 1);
+            } catch (\Throwable $e) {
+                return ['error' => 'Could not generate a short drop code.'];
+            }
+            $alphabet = 'abcdefghijklmnopqrstuvwxyz';
+            $shortCode = '';
+            for ($scan = 0; $scan < $capacity; $scan++) {
+                $value = ($offset + $scan) % $capacity;
+                $candidate = '';
+                for ($position = 0; $position < 4; $position++) {
+                    $candidate = $alphabet[$value % 26] . $candidate;
+                    $value = intdiv($value, 26);
+                }
+                if (!isset($used[$candidate])) {
+                    $shortCode = $candidate;
+                    break;
+                }
+            }
+            if ($shortCode === '') {
+                return ['error' => 'Could not allocate a short drop code.'];
+            }
+
+            $used[$shortCode] = time();
+            $payload = json_encode([
+                'version' => 1,
+                'codes' => $used,
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            if (!is_string($payload)) {
+                return ['error' => 'Could not encode the drop-code registry.'];
+            }
+            $tmp = @tempnam($registryDir, '.drop-codes-');
+            if ($tmp === false || @file_put_contents($tmp, $payload) === false || !@rename($tmp, $registryPath)) {
+                if (is_string($tmp) && is_file($tmp)) {
+                    @unlink($tmp);
+                }
+                return ['error' => 'Could not save the drop-code registry.'];
+            }
+            @chmod($registryPath, 0660);
+            return ['success' => true, 'shortCode' => $shortCode];
+        } finally {
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
+    }
+
     private static function folderOwnersPath(): string
     {
         return self::metaRoot() . 'folder_owners.json';
@@ -3104,10 +3236,11 @@ class FolderModel
         $createdAt = isset($options['createdAt']) && is_numeric($options['createdAt'])
             ? max(0, (int)$options['createdAt'])
             : time();
-        $useShortCode = ($mode === 'drop') && self::boolFromMixed($options['shortCode'] ?? false);
+        $useShortCode = ($mode === 'drop')
+            && (!array_key_exists('shortCode', $options) || self::boolFromMixed($options['shortCode']));
         $accessCodeRequired = self::boolFromMixed($options['accessCodeRequired'] ?? false);
-        if ($useShortCode && (!$accessCodeRequired || $password === '')) {
-            return ["error" => "Short drop links require an access code."];
+        if ($useShortCode && !$accessCodeRequired) {
+            $password = '';
         }
 
         $expires       = time() + max(1, $expirationSeconds);
@@ -3147,7 +3280,16 @@ class FolderModel
             "createdAt" => $createdAt,
         ];
 
-        $saved = self::withLockedShareLinks(function (array $links) use ($token, $record, $useShortCode): array {
+        $allocatedShortCode = '';
+        if ($useShortCode) {
+            $allocation = self::allocateShortDropCode();
+            if (empty($allocation['success'])) {
+                return ["error" => (string)($allocation['error'] ?? 'Could not allocate a short drop code.')];
+            }
+            $allocatedShortCode = (string)$allocation['shortCode'];
+        }
+
+        $saved = self::withLockedShareLinks(function (array $links) use ($token, $record, $allocatedShortCode): array {
             $now = time();
             foreach ($links as $key => $value) {
                 if (!empty($value['expires']) && (int)$value['expires'] < $now) {
@@ -3156,63 +3298,8 @@ class FolderModel
             }
 
             $nextRecord = $record;
-            $shortCode = '';
-            if ($useShortCode) {
-                $occupied = [];
-                foreach ($links as $value) {
-                    if (!is_array($value)) {
-                        continue;
-                    }
-                    $candidate = strtolower(trim((string)($value['shortCode'] ?? '')));
-                    if (preg_match('/^[a-z]{4}$/', $candidate)) {
-                        $occupied[$candidate] = true;
-                    }
-                }
-                if (class_exists('SourceContext') && SourceContext::sourcesEnabled()) {
-                    $currentSourceId = SourceContext::getActiveId();
-                    foreach (SourceContext::listAllSources() as $source) {
-                        if (isset($source['enabled']) && !$source['enabled']) {
-                            continue;
-                        }
-                        $sourceId = (string)($source['id'] ?? '');
-                        if ($sourceId === '' || $sourceId === $currentSourceId) {
-                            continue;
-                        }
-                        $sourceLinks = json_decode((string)@file_get_contents(
-                            SourceContext::metaRootForId($sourceId) . 'share_folder_links.json'
-                        ), true);
-                        if (!is_array($sourceLinks)) {
-                            continue;
-                        }
-                        foreach ($sourceLinks as $sourceRecord) {
-                            if (!is_array($sourceRecord)
-                                || (!empty($sourceRecord['expires']) && (int)$sourceRecord['expires'] < $now)) {
-                                continue;
-                            }
-                            $candidate = strtolower(trim((string)($sourceRecord['shortCode'] ?? '')));
-                            if (preg_match('/^[a-z]{4}$/', $candidate)) {
-                                $occupied[$candidate] = true;
-                            }
-                        }
-                    }
-                }
-                $alphabet = 'abcdefghijklmnopqrstuvwxyz';
-                for ($attempt = 0; $attempt < 128 && $shortCode === ''; $attempt++) {
-                    $candidate = '';
-                    try {
-                        for ($i = 0; $i < 4; $i++) {
-                            $candidate .= $alphabet[random_int(0, 25)];
-                        }
-                    } catch (\Throwable $e) {
-                        return ['links' => $links, 'result' => ['error' => 'Could not generate a short drop code.']];
-                    }
-                    if (!isset($occupied[$candidate])) {
-                        $shortCode = $candidate;
-                    }
-                }
-                if ($shortCode === '') {
-                    return ['links' => $links, 'result' => ['error' => 'Could not allocate a short drop code.']];
-                }
+            $shortCode = $allocatedShortCode;
+            if ($shortCode !== '') {
                 $nextRecord['shortCode'] = $shortCode;
             }
 

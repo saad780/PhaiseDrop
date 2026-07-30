@@ -29,8 +29,8 @@ RewriteRule - - [L]
 RewriteCond %{REQUEST_URI} !^/webdav\.php/ [NC]
 RewriteRule "(^|/)\.(?!well-known/)" - [F]
 RewriteRule ^portal/([A-Za-z0-9_-]+)$ portal.html?slug=$1 [L,QSA]
-# Public Phaise Drop URLs. New drops use a four-letter alias protected by a
-# separately generated access code; 256-bit token routes remain for existing links.
+# Public Phaise Drop URLs. New drops use a direct four-letter capability;
+# 256-bit token routes remain inside the private app for legacy links.
 RewriteRule ^([a-z]{4})/?$ api/folder/shareFolder.php?token=$1 [L,QSA]
 RewriteRule ^d/([a-z]{4}|[a-f0-9]{64})/?$ api/folder/shareFolder.php?token=$1 [L,QSA]
 # Keep entrypoint consistent: serve /index.html through index.php.

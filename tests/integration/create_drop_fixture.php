@@ -18,6 +18,7 @@ $share = \FileRise\Domain\FolderModel::createShareFolderLink(
     1,
     [
         'mode' => 'drop',
+        'shortCode' => 1,
         'hideListing' => 1,
         'preserveFolderStructure' => 1,
         'maxFileSizeMb' => 10,
@@ -38,6 +39,8 @@ $token = (string)$share['token'];
 $secret = (string)($GLOBALS['encryptionKey'] ?? '');
 echo json_encode([
     'token' => $token,
+    'shortCode' => (string)$share['shortCode'],
+    'link' => (string)$share['link'],
     'uploadToken' => hash_hmac('sha256', $token . '|', $secret),
     'folder' => $folder,
 ], JSON_UNESCAPED_SLASHES) . PHP_EOL;

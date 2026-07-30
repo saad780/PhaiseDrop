@@ -19,13 +19,16 @@ The compose definition intentionally uses `CHOWN_ON_START=false`: startup leaves
 
 - Delivered files and preserved folder trees: `/mnt/main/NAS/drop` on the host.
 - User database, application metadata, audit data, and sessions: named Docker volumes, separate from the SMB-visible dataset.
+- Back up `metadata/used_drop_codes.json` with the metadata volume. It is the permanent no-reuse ledger for public four-letter URLs.
 
 ## Security behavior
 
-- New sender URLs use a four-letter alias such as `https://drop.phaise.com/ynei` plus a separately generated eight-character access code. The access code is shown once to the administrator and only its password hash is stored.
-- The four-letter alias is not trusted as a secret: the server resolves it to an internal 256-bit token, requires an unlocked server-side session for uploads and Finish, and never puts the access code in the URL.
-- Access-code attempts are limited to 8 per source IP and drop per 15 minutes, with a 60-attempt global ceiling per drop. Verification fails closed if the attempt ledger cannot be locked or persisted.
-- Existing 256-bit `/d/<token>` links remain compatible.
+- New sender URLs are direct, random four-letter capabilities such as `https://drop.phaise.com/ynei`. There is no password or second access-code prompt.
+- The server resolves the four letters to an internal 256-bit token. Sender pages and upload requests carry only the four-letter reference plus a scoped HMAC; the internal token is never exposed by the new flow.
+- A code is permanently tombstoned when allocated and is never assigned to another drop, even after expiry or revocation. This prevents an old message from ever opening a future recipient's drop.
+- Repeated requests for nonexistent codes are limited to 8 misses per source IP per 15 minutes, in addition to the public gateway limit. Valid drops are resolved before this limiter and remain usable.
+- The public gateway exposes only `/<four letters>` for sender pages. Existing 256-bit `/d/<token>` links remain available only through the private application for legacy compatibility.
+- Four lowercase letters provide 456,976 possible URLs (about 19 bits). Rate limiting reduces casual enumeration, but the short URL is intentionally less secret than a long cryptographic capability. Drops remain upload-only: no listing or downloads are exposed.
 - No file listing on a drop link.
 - Default limits exposed in the admin dialog: 25 GB per file, 100 GB total, 48-hour idle timeout, 7-day hard expiry.
 - Total-byte reservations are serialized under a file lock to prevent concurrent quota bypass.
