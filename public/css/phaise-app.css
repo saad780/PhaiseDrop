@@ -95,6 +95,10 @@ body.pd-dashboard-mode #siteFooter { display: none; }
   justify-content: space-between;
   gap: 32px;
   margin-bottom: 28px;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
 }
 .pd-kicker {
   margin: 0 0 7px;
@@ -335,6 +339,7 @@ body.dark-mode.authed { background: var(--pd-canvas) !important; }
 .dark-mode .header-title h1 { color: var(--pd-ink) !important; }
 .dark-mode .pd-workspace-nav { background: #11161d; border-color: var(--pd-line); }
 .dark-mode .pd-workspace-nav button:hover,.dark-mode .pd-workspace-nav button.is-active { background: #222a35; color: #c6c0ff; }
+.dark-mode .pd-dashboard-hero { background: transparent; box-shadow: none; }
 .dark-mode .pd-refresh,.dark-mode .pd-search,.dark-mode .pd-link-tools select { background: var(--pd-surface); border-color: var(--pd-line); color: var(--pd-ink); }
 .dark-mode .pd-create-receive { background: linear-gradient(135deg,#24213d,#292549); border-color: #3d3763; color: #d9d5ff; }
 .dark-mode .pd-create-share { background: linear-gradient(135deg,#142e29,#15372f); border-color: #265046; color: #bceadd; }
