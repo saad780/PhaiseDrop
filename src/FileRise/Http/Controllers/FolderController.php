@@ -2689,9 +2689,9 @@ class FolderController
         $sharedMaxUploadSize = (isset($adminConfig['sharedMaxUploadSize']) && is_numeric($adminConfig['sharedMaxUploadSize']))
             ? (int)$adminConfig['sharedMaxUploadSize']
             : null;
-        $headerTitle = trim((string)($adminConfig['header_title'] ?? 'FileRise'));
-        if ($headerTitle === '') {
-            $headerTitle = 'FileRise';
+        $headerTitle = trim((string)($adminConfig['header_title'] ?? 'Phaise Drop'));
+        if ($headerTitle === '' || preg_match('/^FileRise(?: Pro)?$/i', $headerTitle)) {
+            $headerTitle = 'Phaise Drop';
         }
 
         $record = is_array($data['record'] ?? null) ? $data['record'] : [];
@@ -2786,7 +2786,7 @@ class FolderController
             <div class="fr-share-shell">
                 <div class="fr-share-card fr-share-card-wide">
                     <div class="fr-share-card-header">
-                        <img id="shareLogo" class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="FileRise">
+                        <img id="shareLogo" class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="Phaise Drop">
                         <div class="fr-share-header-text">
                             <div class="fr-share-kicker"><?php echo $isDropMode ? 'File request' : 'Shared folder'; ?></div>
                             <div id="shareTitle" class="fr-share-title"><?php echo htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8'); ?></div>
@@ -2924,7 +2924,7 @@ class FolderController
                     <?php endif; ?>
                 </div>
 
-                <div id="shareFooter" class="fr-share-footer">&copy; <?php echo date("Y"); ?> FileRise. All rights reserved.</div>
+                <div id="shareFooter" class="fr-share-footer">Phaise Drop · Private file transfer</div>
             </div>
             <script type="application/json" id="shared-data"><?php echo json_encode([
                 $senderReferenceField => $senderReference,

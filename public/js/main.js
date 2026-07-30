@@ -1,7 +1,7 @@
 // /js/main.js — light bootstrap
 import { getBasePath, stripBase, withBase, patchFetchForBasePath } from './basePath.js?v={{APP_QVER}}';
 import { t } from './i18n.js?v={{APP_QVER}}';
-import './dropManager.js?v={{APP_QVER}}';
+import { initDropDashboard } from './dropDashboard.js?v={{APP_QVER}}';
 
 // Expose base path for non-module scripts / debugging.
 try { window.__FR_BASE_PATH__ = getBasePath(); } catch (e) {}
@@ -1072,12 +1072,11 @@ function bindDarkMode() {
   };
   const defaultDescription = document.querySelector('meta[name="description"]')?.content || '';
 
-    const DEFAULT_HEADER_TITLE = 'FileRise';
-    const PRO_DEFAULT_HEADER_TITLE = 'FileRise Pro';
+    const DEFAULT_HEADER_TITLE = 'Phaise Drop';
     const resolveHeaderTitle = (rawTitle, isPro) => {
       const cleaned = String(rawTitle || '').trim();
-      if (!cleaned || cleaned === DEFAULT_HEADER_TITLE) {
-        return isPro ? PRO_DEFAULT_HEADER_TITLE : DEFAULT_HEADER_TITLE;
+      if (!cleaned || /^FileRise(?: Pro)?$/i.test(cleaned)) {
+        return DEFAULT_HEADER_TITLE;
       }
       return cleaned;
     };
@@ -1558,6 +1557,15 @@ function bindDarkMode() {
       shareBtn.__bound = true;
       shareBtn.addEventListener('click', (e) => {
         e.preventDefault();
+        if (window.PhaiseDrop?.openShare) {
+          const folder = window.currentFolder || 'root';
+          window.PhaiseDrop.openShare(folder === 'root' ? [] : [{
+            path: folder,
+            type: 'folder',
+            name: String(folder).split('/').pop() || folder
+          }]);
+          return;
+        }
         const shareModal = document.getElementById('shareFolderModal');
         if (shareModal) shareModal.style.display = 'block';
         else document.dispatchEvent(new CustomEvent('filerise:share-folder', { detail: { folder: window.currentFolder || 'root' } }));
@@ -1972,6 +1980,8 @@ function bindDarkMode() {
         if (!window.__FR_FLAGS.wired.dragScroll) { bindDragAutoScroll(); window.__FR_FLAGS.wired.dragScroll = true; }
         wireModalEnterDefault();
         wireModalA11y();
+
+        try { initDropDashboard(); } catch (e) { console.warn('[Phaise Drop] dashboard init failed', e); }
 
         if (!window.__FR_FLAGS.wired.aiChat && window.__FR_IS_PRO === true) {
           try {

@@ -3236,6 +3236,9 @@ class FolderModel
         $createdAt = isset($options['createdAt']) && is_numeric($options['createdAt'])
             ? max(0, (int)$options['createdAt'])
             : time();
+        $schemaVersion = isset($options['schemaVersion']) && is_numeric($options['schemaVersion'])
+            ? max(0, min(100, (int)$options['schemaVersion']))
+            : 0;
         $useShortCode = ($mode === 'drop')
             && (!array_key_exists('shortCode', $options) || self::boolFromMixed($options['shortCode']));
         $accessCodeRequired = self::boolFromMixed($options['accessCodeRequired'] ?? false);
@@ -3278,6 +3281,7 @@ class FolderModel
             "completedUploads" => [],
             "createdBy" => is_string($createdBy) ? $createdBy : '',
             "createdAt" => $createdAt,
+            "schemaVersion" => $schemaVersion,
         ];
 
         $allocatedShortCode = '';

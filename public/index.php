@@ -95,8 +95,11 @@ if (is_file($siteCfgPath)) {
 }
 
 $branding = (isset($cfg['branding']) && is_array($cfg['branding'])) ? $cfg['branding'] : [];
-$title = trim((string)($cfg['header_title'] ?? 'FileRise'));
-$title = $title !== '' ? $title : 'FileRise';
+$title = trim((string)($cfg['header_title'] ?? 'Phaise Drop'));
+$title = $title !== '' ? $title : 'Phaise Drop';
+if (preg_match('/^FileRise(?: Pro)?$/i', $title)) {
+    $title = 'Phaise Drop';
+}
 $metaDescription = trim((string)($branding['metaDescription'] ?? ''));
 
 $themeColorLight = sanitize_color_hex($branding['themeColorLight'] ?? '');
