@@ -146,6 +146,10 @@ safe_chmod 700 /var/www/sessions
 for d in uploads users metadata; do
   tgt="/var/www/${d}"
   mkdir -p "${tgt}"
+  if [ "${d}" = "uploads" ] && [ "${CHOWN_ON_START:-true}" != "true" ]; then
+    echo "[startup] Preserving upload-root ownership and mode (CHOWN_ON_START=false)."
+    continue
+  fi
   safe_chown www-data:www-data "${tgt}"
   safe_chmod 775 "${tgt}"
 done

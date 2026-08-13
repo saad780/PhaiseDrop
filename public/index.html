@@ -2,8 +2,8 @@
 <html lang="en">
 
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FileRise</title>
-  <meta name="theme-color" content="#0b5ed7">
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Phaise Drop</title>
+  <meta name="theme-color" content="#111827">
   <script src="js/pretheme.js?v={{APP_QVER}}"></script>
   <style id="pretheme-css">
     html,body,#loadingOverlay{background:var(--pre-bg,#ffffff) !important;}
@@ -15,7 +15,7 @@
   <link rel="icon" href="assets/logo-16.png?v={{APP_QVER}}" type="image/png" sizes="16x16">
   <link rel="shortcut icon" href="assets/favicon.ico?v={{APP_QVER}}">
   
-  <meta name="description" content="FileRise is a fast, self-hosted file manager with granular per-folder ACLs, drag-and-drop folder moves, WebDAV, tagging, and a clean UI.">
+  <meta name="description" content="Phaise Drop is a private workspace for requesting uploads and securely sharing files.">
   <meta name="csrf-token" content=""><meta name="share-url" content=""><meta name="color-scheme" content="light dark">
   <link rel="manifest" href="manifest.webmanifest?v={{APP_QVER}}">
   <link rel="apple-touch-icon" href="assets/icons/icon-192.png?v={{APP_QVER}}">
@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="vendor/bootstrap/4.6.2/bootstrap.min.css?v={{APP_QVER}}">
   <link rel="stylesheet" href="css/styles.css?v={{APP_QVER}}">
   <link rel="stylesheet" href="css/vendor/roboto.css?v={{APP_QVER}}">
+  <link rel="stylesheet" href="css/phaise-app.css?v={{APP_QVER}}">
   
   <!-- Fonts -->
   <link rel="preload" as="font" href="fonts/roboto/KFO7CnqEu92Fr1ME7kSn66aGLdTylUAMa3KUBHMdazTgWw.woff2?v={{APP_QVER}}" type="font/woff2" crossorigin>
@@ -46,7 +47,7 @@
         <div class="header-logo">
           <img
   src="assets/logo.svg?v={{APP_QVER}}"
-  alt="FileRise"
+  alt="Phaise Drop"
   class="logo"
   width="50"
   height="50"
@@ -58,7 +59,7 @@
     </div>
     
     <div class="header-title">
-      <h1>FileRise</h1>
+      <h1><span>Phaise</span> Drop</h1>
     </div>
     <div class="header-right">
       <div class="header-buttons-wrapper" style="display: flex; align-items: center;">
@@ -217,6 +218,56 @@
                       <button id="createFolderBtn" class="btn btn-primary" data-i18n-title="create_folder">
                         <i class="material-icons">create_new_folder</i>
                       </button>
+                      <button id="createDropBtn" class="btn btn-success ml-2" title="Create secure file drop" style="display:none;">
+                        <i class="material-icons">add_link</i>
+                      </button>
+                      <div id="createDropModal" class="modal" style="display:none;">
+                        <div class="modal-content phaise-drop-modal">
+                          <h4>Create secure file drop</h4>
+                          <p class="phaise-drop-lead">Create a private upload link. Senders can add files and folders, but can never browse your NAS.</p>
+                          <label for="dropTitle">Drop name</label>
+                          <input id="dropTitle" class="form-control" maxlength="120" placeholder="e.g. Smith wedding footage" autocomplete="off">
+                          <label for="dropInstructions">Instructions <span class="text-muted">(optional)</span></label>
+                          <textarea id="dropInstructions" class="form-control" maxlength="1000" rows="3" placeholder="What should the sender upload?"></textarea>
+                          <div class="phaise-drop-grid">
+                            <div>
+                              <label for="dropCloseMode">Link behavior</label>
+                              <select id="dropCloseMode" class="form-control">
+                                <option value="single" selected>Close when sender finishes</option>
+                                <option value="window">Stay open until expiry</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label for="dropExpiresDays">Hard expiry (days)</label>
+                              <input id="dropExpiresDays" class="form-control" type="number" min="1" max="30" value="7">
+                            </div>
+                            <div>
+                              <label for="dropIdleHours">Idle timeout (hours)</label>
+                              <input id="dropIdleHours" class="form-control" type="number" min="1" max="720" value="48">
+                            </div>
+                            <div>
+                              <label for="dropMaxFileGb">Maximum per file (GB)</label>
+                              <input id="dropMaxFileGb" class="form-control" type="number" min="1" max="100" value="25">
+                            </div>
+                            <div>
+                              <label for="dropMaxTotalGb">Maximum total (GB)</label>
+                              <input id="dropMaxTotalGb" class="form-control" type="number" min="1" max="1953" value="100">
+                            </div>
+                          </div>
+                          <div id="dropCreateResult" class="phaise-drop-result" hidden>
+                            <label for="dropCreatedLink">Share this link</label>
+                            <div class="phaise-drop-link-row">
+                              <input id="dropCreatedLink" class="form-control" readonly>
+                              <button id="copyDropLinkBtn" type="button" class="btn btn-primary">Copy</button>
+                            </div>
+                            <small id="dropCreatedFolder" class="text-muted"></small>
+                          </div>
+                          <div class="phaise-drop-actions">
+                            <button id="cancelCreateDrop" type="button" class="btn btn-secondary">Close</button>
+                            <button id="submitCreateDrop" type="button" class="btn btn-success">Create drop</button>
+                          </div>
+                        </div>
+                      </div>
                       <div id="createFolderModal" class="modal">
                         <div class="modal-content">
                           <h4 data-i18n-key="create_folder_title">Create Folder</h4>
@@ -703,10 +754,7 @@
 </div>
 <footer id="siteFooter" class="site-footer">
   <span>
-    &copy; 2025
-    <a href="https://filerise.net" target="_blank" rel="noopener noreferrer">
-      FileRise
-    </a>
+    Phaise Drop · Private file transfer
   </span>
 </footer>
 </body>

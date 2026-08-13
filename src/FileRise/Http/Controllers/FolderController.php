@@ -41,6 +41,12 @@ class FolderController
     private const SHARE_DAILY_STATE_KEEP_DAYS = 14;
     private const SHARE_UPLOAD_LOG_MAX_BYTES = 5242880;
     private const SHARE_UPLOAD_LOG_MAX_FILES = 3;
+    private const DROP_UNLOCK_WINDOW_SECONDS = 900;
+    private const DROP_UNLOCK_MAX_PER_IP = 8;
+    private const DROP_UNLOCK_MAX_PER_TOKEN = 60;
+    private const DROP_UNLOCK_SESSION_SECONDS = 28800;
+    private const DROP_MISS_WINDOW_SECONDS = 900;
+    private const DROP_MISS_MAX_PER_IP = 8;
 
     private ?array $jsonBodyOverride = null;
 
@@ -137,6 +143,230 @@ class FolderController
         return substr(hash('sha256', $token), 0, 24);
     }
 
+    private static function normalizeDropAccessCode(string $value): string
+    {
+        $normalized = strtoupper((string)preg_replace('/[^A-Za-z0-9]/', '', $value));
+        return preg_match('/^[A-HJ-NP-Z2-9]{8}$/', $normalized) ? $normalized : '';
+    }
+
+    private static function isAccessCodeDropRecord(array $record): bool
+    {
+        return (($record['mode'] ?? '') === 'drop')
+            && !empty($record['accessCodeRequired'])
+            && preg_match('/^[a-z]{4}$/', (string)($record['shortCode'] ?? ''))
+            && !empty($record['password']);
+    }
+
+    private static function dropUnlockSessionKey(string $token): string
+    {
+        return hash('sha256', 'phaise-drop-unlock|' . $token);
+    }
+
+    private static function isDropSessionUnlocked(string $token): bool
+    {
+        self::ensureSession();
+        $key = self::dropUnlockSessionKey($token);
+        $unlocks = isset($_SESSION['phaise_drop_unlocks']) && is_array($_SESSION['phaise_drop_unlocks'])
+            ? $_SESSION['phaise_drop_unlocks']
+            : [];
+        $expires = isset($unlocks[$key]) && is_numeric($unlocks[$key]) ? (int)$unlocks[$key] : 0;
+        if ($expires <= time()) {
+            if (isset($_SESSION['phaise_drop_unlocks'][$key])) {
+                unset($_SESSION['phaise_drop_unlocks'][$key]);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static function grantDropSessionUnlock(string $token): void
+    {
+        self::ensureSession();
+        if (!isset($_SESSION['phaise_drop_unlocks']) || !is_array($_SESSION['phaise_drop_unlocks'])) {
+            $_SESSION['phaise_drop_unlocks'] = [];
+        }
+        $_SESSION['phaise_drop_unlocks'][self::dropUnlockSessionKey($token)] = time() + self::DROP_UNLOCK_SESSION_SECONDS;
+    }
+
+    private static function applyDropUnlockAttemptLimit(string $token, string $ip): ?array
+    {
+        $path = rtrim(self::getShareStateDir(), '/\\') . DIRECTORY_SEPARATOR . 'unlock_attempts.json';
+        $now = time();
+        $cutoff = $now - self::DROP_UNLOCK_WINDOW_SECONDS;
+        $tokenKey = hash('sha256', $token);
+        $ipKey = $tokenKey . '|' . hash('sha256', $ip);
+        $decision = ['ok' => true, 'retryAfter' => 0];
+
+        $persisted = self::withLockedJsonState($path, function (array $state) use ($now, $cutoff, $tokenKey, $ipKey, &$decision) {
+            $byIp = isset($state['byIp']) && is_array($state['byIp']) ? $state['byIp'] : [];
+            $byToken = isset($state['byToken']) && is_array($state['byToken']) ? $state['byToken'] : [];
+            foreach ([$byIp, $byToken] as $bucketIndex => $bucket) {
+                foreach ($bucket as $key => $events) {
+                    if (!is_array($events)) {
+                        unset($bucket[$key]);
+                        continue;
+                    }
+                    $events = array_values(array_filter($events, static fn($ts) => is_numeric($ts) && (int)$ts >= $cutoff));
+                    if ($events) {
+                        $bucket[$key] = $events;
+                    } else {
+                        unset($bucket[$key]);
+                    }
+                }
+                if ($bucketIndex === 0) {
+                    $byIp = $bucket;
+                } else {
+                    $byToken = $bucket;
+                }
+            }
+
+            $ipEvents = $byIp[$ipKey] ?? [];
+            $tokenEvents = $byToken[$tokenKey] ?? [];
+            if (count($ipEvents) >= self::DROP_UNLOCK_MAX_PER_IP || count($tokenEvents) >= self::DROP_UNLOCK_MAX_PER_TOKEN) {
+                $events = count($ipEvents) >= self::DROP_UNLOCK_MAX_PER_IP ? $ipEvents : $tokenEvents;
+                $oldest = $events ? min(array_map(static fn($ts) => (int)$ts, $events)) : $now;
+                $decision = [
+                    'ok' => false,
+                    'retryAfter' => max(1, self::DROP_UNLOCK_WINDOW_SECONDS - max(0, $now - $oldest)),
+                ];
+            } else {
+                $ipEvents[] = $now;
+                $tokenEvents[] = $now;
+                $byIp[$ipKey] = $ipEvents;
+                $byToken[$tokenKey] = $tokenEvents;
+            }
+            return ['byIp' => $byIp, 'byToken' => $byToken];
+        });
+
+        if (!$persisted) {
+            return [
+                'error' => 'Access-code verification is temporarily unavailable. Please try again shortly.',
+                'retryAfter' => 30,
+                'status' => 503,
+            ];
+        }
+
+        if (empty($decision['ok'])) {
+            return [
+                'error' => 'Too many access-code attempts. Please wait and try again.',
+                'retryAfter' => max(1, (int)($decision['retryAfter'] ?? 1)),
+                'status' => 429,
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * Slow down blind scans of the deliberately small public namespace. The
+     * check is only called after resolution fails, so a real link continues to
+     * work even when the same IP has accumulated misses.
+     */
+    private static function applyInvalidDropLookupLimit(string $ip): ?array
+    {
+        $path = rtrim(self::getShareStateDir(), '/\\') . DIRECTORY_SEPARATOR . 'short_link_misses.json';
+        $now = time();
+        $cutoff = $now - self::DROP_MISS_WINDOW_SECONDS;
+        $ipKey = hash('sha256', $ip);
+        $decision = ['ok' => true, 'retryAfter' => 0];
+
+        $persisted = self::withLockedJsonState($path, function (array $state) use ($now, $cutoff, $ipKey, &$decision) {
+            $byIp = isset($state['byIp']) && is_array($state['byIp']) ? $state['byIp'] : [];
+            foreach ($byIp as $key => $events) {
+                if (!is_array($events)) {
+                    unset($byIp[$key]);
+                    continue;
+                }
+                $events = array_values(array_filter(
+                    $events,
+                    static fn($timestamp) => is_numeric($timestamp) && (int)$timestamp >= $cutoff
+                ));
+                if ($events) {
+                    $byIp[$key] = $events;
+                } else {
+                    unset($byIp[$key]);
+                }
+            }
+
+            $events = $byIp[$ipKey] ?? [];
+            if (count($events) >= self::DROP_MISS_MAX_PER_IP) {
+                $oldest = $events ? min(array_map(static fn($timestamp) => (int)$timestamp, $events)) : $now;
+                $decision = [
+                    'ok' => false,
+                    'retryAfter' => max(1, self::DROP_MISS_WINDOW_SECONDS - max(0, $now - $oldest)),
+                ];
+            } else {
+                $events[] = $now;
+                $byIp[$ipKey] = $events;
+            }
+            return ['byIp' => $byIp];
+        });
+
+        // This limiter is defense-in-depth. A metadata I/O problem must not
+        // turn every unknown URL into an application outage.
+        if (!$persisted || !empty($decision['ok'])) {
+            return null;
+        }
+        return [
+            'error' => 'Too many unavailable drop links were requested. Please wait and try again.',
+            'retryAfter' => max(1, (int)($decision['retryAfter'] ?? 1)),
+            'status' => 429,
+        ];
+    }
+
+    private static function resolveDropRequestReference(string $drop, string $legacyToken): array
+    {
+        $drop = trim($drop);
+        $legacyToken = trim($legacyToken);
+        if ($drop !== '') {
+            if (!preg_match('/^[a-z]{4}$/', $drop)) {
+                return ['error' => 'Invalid drop link.', 'status' => 400];
+            }
+            $token = FolderModel::resolveShareFolderReference($drop);
+            return $token !== null
+                ? ['token' => $token, 'reference' => $drop, 'field' => 'drop']
+                : ['error' => 'Drop not found.', 'status' => 404];
+        }
+        if (!preg_match('/^[a-f0-9]{64}$/', $legacyToken)) {
+            return ['error' => 'Missing or invalid drop link.', 'status' => 400];
+        }
+        $token = FolderModel::resolveShareFolderReference($legacyToken);
+        return $token !== null
+            ? ['token' => $token, 'reference' => $legacyToken, 'field' => 'token']
+            : ['error' => 'Drop not found.', 'status' => 404];
+    }
+
+    private static function renderDropAccessPrompt(string $shortCode, string $error = '', int $status = 200): void
+    {
+        http_response_code($status);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Frame-Options: DENY');
+        header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self';");
+        header('Content-Type: text/html; charset=utf-8');
+        $action = htmlspecialchars(fr_with_base_path('/' . $shortCode), ENT_QUOTES, 'UTF-8');
+        $logo = htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $css = htmlspecialchars(fr_with_base_path('/css/share.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $fonts = htmlspecialchars(fr_with_base_path('/css/vendor/roboto.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8');
+        $errorHtml = $error !== ''
+            ? '<div class="fr-share-error" role="alert">' . htmlspecialchars($error, ENT_QUOTES, 'UTF-8') . '</div>'
+            : '';
+        echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+            . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            . '<title>Unlock secure drop</title><link rel="stylesheet" href="' . $fonts . '">'
+            . '<link rel="stylesheet" href="' . $css . '"></head><body class="fr-share-body">'
+            . '<div class="fr-share-shell"><div class="fr-share-card"><div class="fr-share-card-header">'
+            . '<img class="fr-share-logo" src="' . $logo . '" alt="Phaise Drop"><div>'
+            . '<div class="fr-share-title">Secure file drop</div>'
+            . '<div class="fr-share-subtitle">Enter the access code from the person who sent this link.</div>'
+            . '</div></div>' . $errorHtml
+            . '<form class="fr-share-form" method="post" action="' . $action . '">'
+            . '<label for="access_code" class="fr-share-label">Access code</label>'
+            . '<input type="text" name="access_code" id="access_code" class="fr-share-input" '
+            . 'placeholder="ABCD-EFGH" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>'
+            . '<button type="submit" class="fr-share-btn">Unlock</button></form></div></div></body></html>';
+        exit;
+    }
+
     private static function defaultSharedAllowedTypes(): array
     {
         return [
@@ -196,10 +426,11 @@ class FolderController
         }
 
         $allowedTypes = self::normalizeSharedAllowedTypes($record['allowedTypes'] ?? []);
-        if (empty($allowedTypes)) {
+        $isManagedDrop = (($record['mode'] ?? '') === 'drop');
+        if (empty($allowedTypes) && !$isManagedDrop) {
             $allowedTypes = self::defaultSharedAllowedTypes();
         }
-        if ($ext === '' || !in_array($ext, $allowedTypes, true)) {
+        if (!empty($allowedTypes) && ($ext === '' || !in_array($ext, $allowedTypes, true))) {
             return 'File type not allowed.';
         }
 
@@ -218,16 +449,18 @@ class FolderController
         return $dir;
     }
 
-    private static function withLockedJsonState(string $path, callable $mutator): void
+    private static function withLockedJsonState(string $path, callable $mutator): bool
     {
         $fp = @fopen($path, 'c+');
         if ($fp === false) {
-            return;
+            return false;
         }
+        $locked = false;
         try {
             if (!@flock($fp, LOCK_EX)) {
-                return;
+                return false;
             }
+            $locked = true;
             $raw = stream_get_contents($fp);
             $state = [];
             if (is_string($raw) && trim($raw) !== '') {
@@ -240,12 +473,19 @@ class FolderController
             if (!is_array($next)) {
                 $next = $state;
             }
-            @ftruncate($fp, 0);
-            @rewind($fp);
-            @fwrite($fp, json_encode($next, JSON_PRETTY_PRINT));
-            @fflush($fp);
-            @flock($fp, LOCK_UN);
+            $encoded = json_encode($next, JSON_PRETTY_PRINT);
+            if (!is_string($encoded)
+                || !@ftruncate($fp, 0)
+                || !@rewind($fp)
+                || @fwrite($fp, $encoded) !== strlen($encoded)
+                || !@fflush($fp)) {
+                return false;
+            }
+            return true;
         } finally {
+            if ($locked) {
+                @flock($fp, LOCK_UN);
+            }
             @fclose($fp);
         }
     }
@@ -2290,22 +2530,80 @@ class FolderController
     /* -------------------- Public Shared Folder HTML -------------------- */
     public function shareFolder(): void
     {
-        $token        = self::getQueryString('token');
-        $providedPass = self::getQueryString('pass');
-        $page         = self::getQueryInt('page');
-        $path         = (string)($_GET['path'] ?? '');
+        $reference = self::getQueryString('token');
+        $page = self::getQueryInt('page');
+        $path = (string)($_GET['path'] ?? '');
         if ($page === null || $page < 1) {
             $page = 1;
         }
 
-        if (empty($token)) {
+        if ($reference === '') {
             http_response_code(400);
             header('Content-Type: application/json');
             echo json_encode(["error" => "Missing token."]);
             exit;
         }
 
-        $data = FolderModel::getSharedFolderData($token, $providedPass, $page, 10, $path);
+        $data = null;
+        $resolvedToken = FolderModel::resolveShareFolderReference($reference);
+        $token = $resolvedToken ?? $reference;
+        $unavailableStatus = 0;
+        if ($resolvedToken === null && preg_match('/^[a-z]{4}$/', $reference)) {
+            $lookupLimit = self::applyInvalidDropLookupLimit(self::detectSharedClientIp());
+            if ($lookupLimit !== null) {
+                $unavailableStatus = (int)($lookupLimit['status'] ?? 429);
+                header('Retry-After: ' . max(1, (int)($lookupLimit['retryAfter'] ?? 1)));
+                $data = ['error' => (string)$lookupLimit['error']];
+            }
+        }
+        $recordForUnlock = $resolvedToken !== null ? FolderModel::getShareFolderRecord($resolvedToken) : null;
+        $isAccessCodeDrop = is_array($recordForUnlock) && self::isAccessCodeDropRecord($recordForUnlock);
+        $passwordVerified = false;
+        $providedPass = $isAccessCodeDrop ? '' : self::getQueryString('pass');
+
+        if ($isAccessCodeDrop) {
+            // Closed/expired/missing destinations should report their terminal state
+            // without asking the recipient for a code first.
+            $preflight = FolderModel::getSharedFolderData($token, null, $page, 10, $path, true);
+            if (isset($preflight['error'])) {
+                $data = $preflight;
+            } else {
+                $shortCode = (string)$recordForUnlock['shortCode'];
+                $unlocked = self::isDropSessionUnlocked($token);
+                if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+                    if ($unlocked) {
+                        header('Location: ' . fr_with_base_path('/' . $shortCode), true, 303);
+                        exit;
+                    }
+                    $limit = self::applyDropUnlockAttemptLimit($token, self::detectSharedClientIp());
+                    if ($limit !== null) {
+                        header('Retry-After: ' . max(1, (int)($limit['retryAfter'] ?? 1)));
+                        self::renderDropAccessPrompt(
+                            $shortCode,
+                            (string)$limit['error'],
+                            (int)($limit['status'] ?? 429)
+                        );
+                    }
+                    $submitted = isset($_POST['access_code']) && !is_array($_POST['access_code'])
+                        ? self::normalizeDropAccessCode((string)$_POST['access_code'])
+                        : '';
+                    if ($submitted === '' || !password_verify($submitted, (string)$recordForUnlock['password'])) {
+                        self::renderDropAccessPrompt($shortCode, 'That access code is not valid.', 403);
+                    }
+                    self::grantDropSessionUnlock($token);
+                    header('Location: ' . fr_with_base_path('/' . $shortCode), true, 303);
+                    exit;
+                }
+                if (!$unlocked) {
+                    self::renderDropAccessPrompt($shortCode);
+                }
+                $passwordVerified = true;
+            }
+        }
+
+        if (!is_array($data)) {
+            $data = FolderModel::getSharedFolderData($token, $providedPass, $page, 10, $path, $passwordVerified);
+        }
 
         if (isset($data['needs_password']) && $data['needs_password'] === true) {
             header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -2353,18 +2651,47 @@ class FolderController
         }
 
         if (isset($data['error'])) {
-            http_response_code(403);
-            header('Content-Type: application/json');
-            echo json_encode(["error" => $data['error']]);
-            exit;
+            $isClosed = !empty($data['closed']);
+            http_response_code($unavailableStatus > 0 ? $unavailableStatus : ($isClosed ? 410 : 404));
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('X-Frame-Options: DENY');
+            header("Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; style-src 'self'; img-src 'self'; font-src 'self';");
+            header('Content-Type: text/html; charset=utf-8'); ?>
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title><?php echo $isClosed ? 'Drop closed' : 'Drop unavailable'; ?></title>
+                <link rel="stylesheet" href="<?php echo htmlspecialchars(fr_with_base_path('/css/vendor/roboto.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>">
+                <link rel="stylesheet" href="<?php echo htmlspecialchars(fr_with_base_path('/css/share.css?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>">
+            </head>
+            <body class="fr-share-body">
+                <div class="fr-share-shell">
+                    <div class="fr-share-card">
+                        <div class="fr-share-card-header">
+                            <img class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="Phaise Drop">
+                            <div>
+                                <div class="fr-share-title"><?php echo $isClosed ? 'This drop is closed' : 'This drop is unavailable'; ?></div>
+                                <div class="fr-share-subtitle"><?php echo $isClosed
+                                    ? 'The files were delivered or the upload window ended. You can close this page.'
+                                    : 'Check the link with the person who sent it to you.'; ?></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            <?php exit;
         }
         $adminConfig = AdminModel::getConfig();
         $sharedMaxUploadSize = (isset($adminConfig['sharedMaxUploadSize']) && is_numeric($adminConfig['sharedMaxUploadSize']))
             ? (int)$adminConfig['sharedMaxUploadSize']
             : null;
-        $headerTitle = trim((string)($adminConfig['header_title'] ?? 'FileRise'));
-        if ($headerTitle === '') {
-            $headerTitle = 'FileRise';
+        $headerTitle = trim((string)($adminConfig['header_title'] ?? 'Phaise Drop'));
+        if ($headerTitle === '' || preg_match('/^FileRise(?: Pro)?$/i', $headerTitle)) {
+            $headerTitle = 'Phaise Drop';
         }
 
         $record = is_array($data['record'] ?? null) ? $data['record'] : [];
@@ -2390,7 +2717,9 @@ class FolderController
         $aiEnabled = !empty($record['aiEnabled']);
         $preserveFolderStructure = !isset($record['preserveFolderStructure']) || !empty($record['preserveFolderStructure']);
 
-        $displayName = $isDropMode ? 'Upload files' : 'Shared Folder';
+        $dropTitle = trim((string)($record['title'] ?? ''));
+        $dropInstructions = trim((string)($record['instructions'] ?? ''));
+        $displayName = $isDropMode ? ($dropTitle !== '' ? $dropTitle : 'Upload files') : 'Shared Folder';
         if (!$isDropMode) {
             if ($currentPath !== '') {
                 $displayName = basename($currentPath);
@@ -2412,6 +2741,12 @@ class FolderController
         $allowedTypes = self::normalizeSharedAllowedTypes($record['allowedTypes'] ?? []);
         $dailyFileLimit = (isset($record['dailyFileLimit']) && is_numeric($record['dailyFileLimit'])) ? (int)$record['dailyFileLimit'] : 0;
         $maxTotalMbPerDay = (isset($record['maxTotalMbPerDay']) && is_numeric($record['maxTotalMbPerDay'])) ? (int)$record['maxTotalMbPerDay'] : 0;
+        $maxTotalMb = (isset($record['maxTotalMb']) && is_numeric($record['maxTotalMb'])) ? (int)$record['maxTotalMb'] : 0;
+        $acceptedBytes = (isset($record['acceptedBytes']) && is_numeric($record['acceptedBytes'])) ? max(0, (int)$record['acceptedBytes']) : 0;
+        $uploadedFiles = (isset($record['uploadedFiles']) && is_numeric($record['uploadedFiles'])) ? max(0, (int)$record['uploadedFiles']) : 0;
+        $closeMode = (($record['closeMode'] ?? 'window') === 'single') ? 'single' : 'window';
+        $senderReferenceField = ($isDropMode && preg_match('/^[a-z]{4}$/', $reference)) ? 'drop' : 'token';
+        $senderReference = $senderReferenceField === 'drop' ? $reference : $token;
 
         $uploadToken = '';
         if ($allowUpload) {
@@ -2451,7 +2786,7 @@ class FolderController
             <div class="fr-share-shell">
                 <div class="fr-share-card fr-share-card-wide">
                     <div class="fr-share-card-header">
-                        <img id="shareLogo" class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="FileRise">
+                        <img id="shareLogo" class="fr-share-logo" src="<?php echo htmlspecialchars(fr_with_base_path('/assets/logo.svg?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" alt="Phaise Drop">
                         <div class="fr-share-header-text">
                             <div class="fr-share-kicker"><?php echo $isDropMode ? 'File request' : 'Shared folder'; ?></div>
                             <div id="shareTitle" class="fr-share-title"><?php echo htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8'); ?></div>
@@ -2484,7 +2819,7 @@ class FolderController
                                 <?php endif; ?>
                             </div>
                             <form action="<?php echo htmlspecialchars(fr_with_base_path('/api/folder/uploadToSharedFolder.php'), ENT_QUOTES, 'UTF-8'); ?>" method="post" enctype="multipart/form-data" class="fr-share-upload-form">
-                                <input type="hidden" name="token" value="<?php echo htmlspecialchars($token, ENT_QUOTES, 'UTF-8'); ?>">
+                                <input type="hidden" name="<?php echo $senderReferenceField; ?>" value="<?php echo htmlspecialchars($senderReference, ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php if (!empty($providedPass)) : ?>
                                     <input type="hidden" name="pass" value="<?php echo htmlspecialchars($providedPass, ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php endif; ?>
@@ -2506,12 +2841,15 @@ class FolderController
                         </div>
                     <?php elseif ($allowUpload && $isDropMode) : ?>
                         <div class="fr-share-card fr-share-upload fr-share-upload-drop">
-                            <div class="fr-share-upload-title">Upload files</div>
+                            <div class="fr-share-upload-title">Send files securely</div>
                             <div class="fr-share-upload-subtitle">
                                 Uploaders can't see existing files<?php echo $allowSubfolders ? '.' : ', and folder uploads are disabled for this link.'; ?>
                             </div>
+                            <?php if ($dropInstructions !== '') : ?>
+                                <div class="fr-share-drop-instructions"><?php echo nl2br(htmlspecialchars($dropInstructions, ENT_QUOTES, 'UTF-8')); ?></div>
+                            <?php endif; ?>
                             <form id="shareDropUploadForm" action="<?php echo htmlspecialchars(fr_with_base_path('/api/folder/uploadToSharedFolder.php'), ENT_QUOTES, 'UTF-8'); ?>" method="post" enctype="multipart/form-data" class="fr-share-upload-form fr-share-upload-form-drop">
-                                <input type="hidden" name="token" value="<?php echo htmlspecialchars($token, ENT_QUOTES, 'UTF-8'); ?>">
+                                <input type="hidden" name="<?php echo $senderReferenceField; ?>" value="<?php echo htmlspecialchars($senderReference, ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php if (!empty($providedPass)) : ?>
                                     <input type="hidden" name="pass" value="<?php echo htmlspecialchars($providedPass, ENT_QUOTES, 'UTF-8'); ?>">
                                 <?php endif; ?>
@@ -2537,6 +2875,19 @@ class FolderController
                             </form>
                             <div id="shareDropRules" class="fr-share-drop-rules"></div>
                             <div id="shareDropQueue" class="fr-share-drop-queue"></div>
+                            <?php if ($closeMode === 'single') : ?>
+                                <div class="fr-share-drop-finish">
+                                    <div>
+                                        <strong>Everything uploaded?</strong>
+                                        <div class="fr-share-upload-subtitle">Finish closes this private link permanently.</div>
+                                    </div>
+                                    <button type="button" id="shareDropFinishBtn" class="fr-share-btn">Finish upload</button>
+                                </div>
+                            <?php endif; ?>
+                            <div id="shareDropComplete" class="fr-share-drop-complete" hidden role="status">
+                                <strong>Upload complete</strong>
+                                <span>Your files were delivered. This link is now closed.</span>
+                            </div>
                         </div>
                     <?php endif; ?>
 
@@ -2573,10 +2924,10 @@ class FolderController
                     <?php endif; ?>
                 </div>
 
-                <div id="shareFooter" class="fr-share-footer">&copy; <?php echo date("Y"); ?> FileRise. All rights reserved.</div>
+                <div id="shareFooter" class="fr-share-footer">Phaise Drop · Private file transfer</div>
             </div>
             <script type="application/json" id="shared-data"><?php echo json_encode([
-                'token' => $token,
+                $senderReferenceField => $senderReference,
                 'entries' => $entries,
                 'shareRoot' => $shareRoot,
                 'path' => $currentPath,
@@ -2594,6 +2945,10 @@ class FolderController
                 'allowedTypes' => $allowedTypes,
                 'dailyFileLimit' => max(0, $dailyFileLimit),
                 'maxTotalMbPerDay' => max(0, $maxTotalMbPerDay),
+                'maxTotalMb' => max(0, $maxTotalMb),
+                'acceptedBytes' => $acceptedBytes,
+                'uploadedFiles' => $uploadedFiles,
+                'closeMode' => $closeMode,
             ], JSON_HEX_TAG | JSON_HEX_AMP); ?></script>
             <script src="<?php echo htmlspecialchars(fr_with_base_path('/js/shareBranding.js?v={{APP_QVER}}'), ENT_QUOTES, 'UTF-8'); ?>" defer></script>
             <?php if ($isDropMode) : ?>
@@ -2609,6 +2964,130 @@ class FolderController
     }
 
     /* -------------------- API: Create Share Folder Link -------------------- */
+    public function createDrop(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        self::requireAuth();
+        self::requireAdmin();
+        self::requireCsrf();
+        self::requireNotReadOnly();
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $in = $this->readJsonBody();
+        $title = trim((string)($in['title'] ?? ''));
+        $title = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $title);
+        $title = is_string($title) ? trim(preg_replace('/\s+/u', ' ', $title)) : '';
+        if ($title === '' || mb_strlen($title) > 120) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Enter a drop name of 1 to 120 characters.']);
+            exit;
+        }
+
+        $instructions = trim((string)($in['instructions'] ?? ''));
+        $instructions = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/u', '', $instructions);
+        if (!is_string($instructions) || mb_strlen($instructions) > 1000) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Instructions must be 1,000 characters or fewer.']);
+            exit;
+        }
+
+        $closeMode = strtolower(trim((string)($in['closeMode'] ?? 'single'))) === 'window'
+            ? 'window'
+            : 'single';
+        $expiresDays = isset($in['expiresDays']) && is_numeric($in['expiresDays'])
+            ? max(1, min(30, (int)$in['expiresDays']))
+            : 7;
+        $idleHours = isset($in['idleHours']) && is_numeric($in['idleHours'])
+            ? max(1, min(720, (int)$in['idleHours']))
+            : 48;
+        $maxFileSizeMb = isset($in['maxFileSizeMb']) && is_numeric($in['maxFileSizeMb'])
+            ? max(1, min(102400, (int)$in['maxFileSizeMb']))
+            : 25600;
+        $maxTotalMb = isset($in['maxTotalMb']) && is_numeric($in['maxTotalMb'])
+            ? max(1, min(2000000, (int)$in['maxTotalMb']))
+            : 102400;
+
+        $username = trim((string)($_SESSION['username'] ?? 'admin'));
+        $safeTitle = preg_replace('/[<>:"\/\\|?*\x00-\x1F]+/u', '-', $title);
+        $safeTitle = is_string($safeTitle) ? trim(preg_replace('/\s+/u', ' ', $safeTitle), '. ') : '';
+        if ($safeTitle === '') {
+            $safeTitle = 'Files';
+        }
+        $safeTitle = mb_substr($safeTitle, 0, 80);
+        try {
+            $suffix = bin2hex(random_bytes(3));
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Could not generate secure drop credentials.']);
+            exit;
+        }
+        $folderName = 'Drop ' . gmdate('Y-m-d') . ' - ' . $safeTitle . ' - ' . $suffix;
+
+        $created = FolderModel::createFolder($folderName, 'root', $username);
+        if (empty($created['success'])) {
+            http_response_code(400);
+            echo json_encode(['error' => (string)($created['error'] ?? 'Could not create the destination folder.')]);
+            exit;
+        }
+        $folder = (string)($created['folder'] ?? $folderName);
+
+        $share = FolderModel::createShareFolderLink(
+            $folder,
+            $expiresDays * 86400,
+            '',
+            1,
+            1,
+            [
+                'mode' => 'drop',
+                'shortCode' => 1,
+                'hideListing' => 1,
+                'preserveFolderStructure' => 1,
+                'maxFileSizeMb' => $maxFileSizeMb,
+                'maxTotalMb' => $maxTotalMb,
+                'closeMode' => $closeMode,
+                'idleTimeoutSeconds' => $idleHours * 3600,
+                'title' => $title,
+                'instructions' => $instructions,
+                'createdBy' => $username,
+                'createdAt' => time(),
+            ]
+        );
+        if (!empty($share['error'])) {
+            FolderModel::deleteFolderRecursiveAdmin($folder);
+            http_response_code(500);
+            echo json_encode(['error' => (string)$share['error']]);
+            exit;
+        }
+
+        AuditHook::log('drop.create', [
+            'user' => $username,
+            'folder' => $folder,
+            'path' => $folder,
+            'meta' => [
+                'tokenFingerprint' => self::shareTokenFingerprint((string)$share['token']),
+                'closeMode' => $closeMode,
+                'expiresDays' => $expiresDays,
+                'maxFileSizeMb' => $maxFileSizeMb,
+                'maxTotalMb' => $maxTotalMb,
+            ],
+        ]);
+
+        echo json_encode([
+            'success' => true,
+            'folder' => $folder,
+            'shortCode' => $share['shortCode'],
+            'link' => $share['link'],
+            'expires' => $share['expires'],
+            'closeMode' => $closeMode,
+        ], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
     public function createShareFolderLink(): void
     {
         header('Content-Type: application/json');
@@ -2654,6 +3133,13 @@ class FolderController
             : 0;
         $maxTotalMbPerDay = isset($in['maxTotalMbPerDay']) && is_numeric($in['maxTotalMbPerDay'])
             ? max(0, min(2000000, (int)$in['maxTotalMbPerDay']))
+            : 0;
+        $maxTotalMb = isset($in['maxTotalMb']) && is_numeric($in['maxTotalMb'])
+            ? max(0, min(2000000, (int)$in['maxTotalMb']))
+            : 0;
+        $closeMode = strtolower(trim((string)($in['closeMode'] ?? 'window'))) === 'single' ? 'single' : 'window';
+        $idleTimeoutSeconds = isset($in['idleTimeoutSeconds']) && is_numeric($in['idleTimeoutSeconds'])
+            ? max(0, min(2592000, (int)$in['idleTimeoutSeconds']))
             : 0;
         $allowedTypes = self::normalizeSharedAllowedTypes($in['allowedTypes'] ?? []);
 
@@ -2740,6 +3226,11 @@ class FolderController
                 'allowedTypes' => $allowedTypes,
                 'dailyFileLimit' => $dailyFileLimit,
                 'maxTotalMbPerDay' => $maxTotalMbPerDay,
+                'maxTotalMb' => $maxTotalMb,
+                'closeMode' => $closeMode,
+                'idleTimeoutSeconds' => $idleTimeoutSeconds,
+                'title' => (string)($in['title'] ?? ''),
+                'instructions' => (string)($in['instructions'] ?? ''),
                 'createdBy' => $username,
                 'createdAt' => time(),
             ]
@@ -2779,14 +3270,8 @@ class FolderController
             exit;
         }
 
-        $token = trim((string)($_POST['token'] ?? ''));
-        if ($token === '') {
-            http_response_code(400);
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(["error" => "Missing share token."]);
-            exit;
-        }
-
+        $dropReference = trim((string)($_POST['drop'] ?? ''));
+        $legacyToken = trim((string)($_POST['token'] ?? ''));
         $subPath = (string)($_POST['path'] ?? '');
         $providedPass = (string)($_POST['pass'] ?? '');
         $uploadToken = (string)($_POST['share_upload_token'] ?? '');
@@ -2800,6 +3285,12 @@ class FolderController
             exit;
         };
 
+        $resolvedReference = self::resolveDropRequestReference($dropReference, $legacyToken);
+        if (!empty($resolvedReference['error'])) {
+            $respondError((int)($resolvedReference['status'] ?? 400), (string)$resolvedReference['error']);
+        }
+        $token = (string)$resolvedReference['token'];
+
         $secret = (string)($GLOBALS['encryptionKey'] ?? '');
         if ($secret !== '') {
             $expectedScoped = hash_hmac('sha256', $token . '|' . $subPath . '|' . $providedPass, $secret);
@@ -2811,7 +3302,11 @@ class FolderController
             }
         }
 
-        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath);
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        $passwordVerified = is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && self::isDropSessionUnlocked($token);
+        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath, $passwordVerified);
         if (isset($ctx['needs_password'])) {
             $respondError(403, "Password required.");
         }
@@ -2840,6 +3335,10 @@ class FolderController
         $relativePath = '';
         $filesForModel = [];
         $requestParams = ['folder' => $targetFolder, 'source' => 'shared'];
+        if (isset($_POST['clientModifiedAtMs']) && is_scalar($_POST['clientModifiedAtMs'])) {
+            $requestParams['clientModifiedAtMs'] = (string)$_POST['clientModifiedAtMs'];
+        }
+        $dropUploadId = '';
 
         if ($isChunkUpload) {
             $chunkNo = isset($_POST['resumableChunkNumber']) ? (int)$_POST['resumableChunkNumber'] : 0;
@@ -2852,6 +3351,7 @@ class FolderController
             if ($identifier === '' || !preg_match('/^[A-Za-z0-9_-]{1,120}$/', $identifier)) {
                 $respondError(400, 'Invalid upload identifier.');
             }
+            $dropUploadId = 'chunk_' . $identifier;
 
             $filename = basename(trim((string)($_POST['resumableFilename'] ?? '')));
             if ($filename === '' || !preg_match(REGEX_FILE_NAME, $filename)) {
@@ -2957,6 +3457,10 @@ class FolderController
                 $requestParams['relativePath'] = $relativePath;
             }
             $filesForModel['file'] = $fileUpload;
+            $clientUploadId = trim((string)($_POST['phaiseUploadId'] ?? ''));
+            $dropUploadId = preg_match('/^[A-Za-z0-9_-]{8,160}$/', $clientUploadId)
+                ? $clientUploadId
+                : ('single_' . bin2hex(random_bytes(16)));
         }
 
         $ruleError = self::validateSharedUploadRules($record, $filename, $sizeBytes);
@@ -2970,8 +3474,19 @@ class FolderController
             $respondError(429, $quotaError);
         }
 
+        $isManagedDrop = (($record['mode'] ?? '') === 'drop') && preg_match('/^[a-f0-9]{64}$/', $token);
+        if ($isManagedDrop) {
+            $reservation = FolderModel::reserveSharedDropUpload($token, $dropUploadId, $sizeBytes);
+            if (!empty($reservation['error'])) {
+                $respondError(429, (string)$reservation['error']);
+            }
+        }
+
         $result = UploadModel::handleUpload($requestParams, $filesForModel);
         if (isset($result['error'])) {
+            if ($isManagedDrop) {
+                FolderModel::releaseSharedDropUpload($token, $dropUploadId);
+            }
             $respondError(isset($result['code']) ? (int)$result['code'] : 400, (string)$result['error']);
         }
 
@@ -2979,6 +3494,12 @@ class FolderController
         $isSuccess = isset($result['success']) && !$isChunkIntermediate;
 
         if ($isSuccess) {
+            if ($isManagedDrop) {
+                $committed = FolderModel::completeSharedDropUpload($token, $dropUploadId, $sizeBytes);
+                if (!empty($committed['error'])) {
+                    error_log('Drop quota commit failed for ' . $tokenHash . ': ' . (string)$committed['error']);
+                }
+            }
             self::incrementSharedDailyQuota($tokenHash, $sizeBytes);
             $folderKey = ACL::normalizeFolder($targetFolder);
             $effectiveRelPath = $relativePath !== '' ? str_replace('\\', '/', ltrim($relativePath, '/')) : $filename;
@@ -2990,17 +3511,143 @@ class FolderController
 
         if ($isSuccess && !$wantsJson && !$isChunkUpload) {
             $_SESSION['upload_message'] = "File uploaded successfully.";
-            $redirectUrl = fr_with_base_path("/api/folder/shareFolder.php?token=" . urlencode($token));
+            $redirectUrl = ($resolvedReference['field'] ?? '') === 'drop'
+                ? fr_with_base_path('/' . rawurlencode((string)$resolvedReference['reference']))
+                : fr_with_base_path("/api/folder/shareFolder.php?token=" . urlencode($token));
             if ($providedPass !== '') {
-                $redirectUrl .= "&pass=" . urlencode($providedPass);
+                $redirectUrl .= (strpos($redirectUrl, '?') === false ? '?' : '&') . "pass=" . urlencode($providedPass);
             }
             if ($subPath !== '') {
-                $redirectUrl .= "&path=" . urlencode($subPath);
+                $redirectUrl .= (strpos($redirectUrl, '?') === false ? '?' : '&') . "path=" . urlencode($subPath);
             }
             header("Location: " . $redirectUrl);
             exit;
         }
 
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
+
+    public function sharedDropUploadStatus(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+            http_response_code(405);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $dropReference = self::getQueryString('drop');
+        $legacyToken = self::getQueryString('token');
+        $providedPass = self::getQueryString('pass');
+        $subPath = self::getQueryString('path');
+        $uploadToken = self::getQueryString('share_upload_token');
+        $identifier = self::getQueryString('resumableIdentifier');
+        $chunkNumber = self::getQueryInt('resumableChunkNumber');
+        $resolvedReference = self::resolveDropRequestReference($dropReference, $legacyToken);
+        if (!empty($resolvedReference['error'])
+            || !preg_match('/^[A-Za-z0-9_-]{1,120}$/', $identifier)
+            || $chunkNumber === null
+            || $chunkNumber < 1) {
+            http_response_code(!empty($resolvedReference['error']) ? (int)($resolvedReference['status'] ?? 400) : 400);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => !empty($resolvedReference['error'])
+                ? (string)$resolvedReference['error']
+                : 'Invalid resumable upload status request.']);
+            exit;
+        }
+        $token = (string)$resolvedReference['token'];
+
+        $secret = (string)($GLOBALS['encryptionKey'] ?? '');
+        $expectedScoped = $secret !== '' ? hash_hmac('sha256', $token . '|' . $subPath . '|' . $providedPass, $secret) : '';
+        $expectedGlobal = $secret !== '' ? hash_hmac('sha256', $token . '|' . $providedPass, $secret) : '';
+        if ($uploadToken === '' || ($expectedScoped === '' && $expectedGlobal === '')
+            || (!hash_equals($expectedScoped, $uploadToken) && !hash_equals($expectedGlobal, $uploadToken))) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Upload token missing or invalid.']);
+            exit;
+        }
+
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        $passwordVerified = is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && self::isDropSessionUnlocked($token);
+        $ctx = FolderModel::getSharedUploadContext($token, $providedPass, $subPath, $passwordVerified);
+        if (!empty($ctx['error']) || !empty($ctx['needs_password'])) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => (string)($ctx['error'] ?? 'Password required.')]);
+            exit;
+        }
+        $record = is_array($ctx['record'] ?? null) ? $ctx['record'] : [];
+        $dropUploadId = 'chunk_' . $identifier;
+        if (isset($record['completedUploads'][$dropUploadId])) {
+            header('Cache-Control: no-store');
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['status' => 'complete']);
+            exit;
+        }
+
+        $targetFolder = (string)($ctx['folder'] ?? 'root');
+        $result = UploadModel::handleUpload([
+            'folder' => $targetFolder === '' ? 'root' : $targetFolder,
+            'source' => 'shared',
+            'resumableChunkNumber' => $chunkNumber,
+            'resumableIdentifier' => $identifier,
+        ], []);
+        header('Cache-Control: no-store');
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
+
+    public function finishSharedDrop(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Method not allowed.']);
+            exit;
+        }
+
+        $dropReference = trim((string)($_POST['drop'] ?? ''));
+        $legacyToken = trim((string)($_POST['token'] ?? ''));
+        $providedPass = (string)($_POST['pass'] ?? '');
+        $uploadToken = (string)($_POST['share_upload_token'] ?? '');
+        $resolvedReference = self::resolveDropRequestReference($dropReference, $legacyToken);
+        if (!empty($resolvedReference['error'])) {
+            http_response_code((int)($resolvedReference['status'] ?? 400));
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => (string)$resolvedReference['error']]);
+            exit;
+        }
+        $token = (string)$resolvedReference['token'];
+
+        $unlockRecord = FolderModel::getShareFolderRecord($token);
+        if (is_array($unlockRecord)
+            && self::isAccessCodeDropRecord($unlockRecord)
+            && !self::isDropSessionUnlocked($token)) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Access code required.']);
+            exit;
+        }
+
+        $secret = (string)($GLOBALS['encryptionKey'] ?? '');
+        $expected = $secret !== '' ? hash_hmac('sha256', $token . '|' . $providedPass, $secret) : '';
+        if ($expected === '' || $uploadToken === '' || !hash_equals($expected, $uploadToken)) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Finish token missing or invalid.']);
+            exit;
+        }
+
+        $result = FolderModel::finishSharedDrop($token);
+        if (!empty($result['error'])) {
+            http_response_code(400);
+        }
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode($result);
         exit;

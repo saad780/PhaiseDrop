@@ -7,6 +7,7 @@
     "phpseclib/phpseclib": "^3.0.54",
     "robthree/twofactorauth": "^3.0",
     "endroid/qr-code": "^5.0",
+    "maennchen/zipstream-php": "^3.1",
     "sabre/dav": "^4.4"
   },
   "require-dev": {

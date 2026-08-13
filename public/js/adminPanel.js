@@ -44,13 +44,12 @@ const PRO_API_MIN_VERSION_LABELS = {
 const CORE_SOURCE_TYPES = ['local', 'webdav'];
 const ALL_SOURCE_TYPES = ['local', 's3', 'sftp', 'ftp', 'webdav', 'smb', 'gdrive', 'onedrive', 'dropbox'];
 const CORE_REQUIRED_PRO_API_LEVEL = Math.max(...Object.values(PRO_API_LEVELS));
-const DEFAULT_HEADER_TITLE = 'FileRise';
-const PRO_DEFAULT_HEADER_TITLE = 'FileRise Pro';
+const DEFAULT_HEADER_TITLE = 'Phaise Drop';
 
 function resolveHeaderTitle(rawTitle, isPro) {
   const cleaned = String(rawTitle || '').trim();
-  if (!cleaned || cleaned === DEFAULT_HEADER_TITLE) {
-    return isPro ? PRO_DEFAULT_HEADER_TITLE : DEFAULT_HEADER_TITLE;
+  if (!cleaned || /^FileRise(?: Pro)?$/i.test(cleaned)) {
+    return DEFAULT_HEADER_TITLE;
   }
   return cleaned;
 }
@@ -7023,14 +7022,25 @@ export function openAdminPanel() {
                 ${tf("settings_search_empty", "No matching settings found.")}
               </div>
             </div>
-            ${sections.map(sec => `
-              <div id="${sec.id}Header" class="section-header collapsed">
-                <div class="section-header-inner">
-                  ${sec.label} <i class="material-icons">expand_more</i>
-                </div>
+            <div class="pd-settings-layout">
+              <nav class="pd-settings-nav" aria-label="Settings categories">
+                ${sections.map((sec, index) => `
+                  <button type="button" data-settings-section="${sec.id}" class="${index === 0 ? 'is-active' : ''}">
+                    <span>${sec.label}</span><i class="material-icons">chevron_right</i>
+                  </button>
+                `).join("")}
+              </nav>
+              <div class="pd-settings-pages">
+                ${sections.map(sec => `
+                  <div id="${sec.id}Header" class="section-header collapsed">
+                    <div class="section-header-inner">
+                      ${sec.label} <i class="material-icons">expand_more</i>
+                    </div>
+                  </div>
+                  <div id="${sec.id}Content" class="section-content"></div>
+                `).join("")}
               </div>
-              <div id="${sec.id}Content" class="section-content"></div>
-            `).join("")}
+            </div>
 
               <div class="action-row">
                 <button type="button" id="cancelAdminSettings" class="btn btn-secondary">${t("cancel")}</button>
@@ -7051,6 +7061,30 @@ export function openAdminPanel() {
           headerEl.__wired = true;
           headerEl.addEventListener("click", () => toggleSection(id));
         });
+
+        const activateSettingsSection = (id) => {
+          sectionIds.forEach(sectionId => {
+            const headerEl = document.getElementById(sectionId + "Header");
+            const contentEl = document.getElementById(sectionId + "Content");
+            if (!headerEl || !contentEl) return;
+            const active = sectionId === id;
+            headerEl.classList.toggle("collapsed", !active);
+            setSectionContentImmediate(contentEl, active);
+          });
+          mdl.querySelectorAll('[data-settings-section]').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.settingsSection === id);
+          });
+          if (id === 'shareLinks') {
+            loadShareLinksSection();
+            const contentEl = document.getElementById('shareLinksContent');
+            if (contentEl) contentEl.dataset.loaded = '1';
+          }
+          mdl.querySelector('.pd-settings-pages')?.scrollTo({ top: 0, behavior: 'smooth' });
+        };
+        mdl.querySelectorAll('[data-settings-section]').forEach(button => {
+          button.addEventListener('click', () => activateSettingsSection(button.dataset.settingsSection));
+        });
+        activateSettingsSection(sectionIds[0]);
 
         document.getElementById("userManagementContent").innerHTML = `
   <div class="admin-user-actions d-flex flex-wrap" style="gap:8px; margin-bottom:6px;">

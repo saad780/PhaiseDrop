@@ -11,6 +11,20 @@ RUN apt-get update && \
 RUN mkdir -p /var/www && rm -f /var/www/html/index.html
 COPY . /var/www
 
+# Stamp every frontend/module reference with a deterministic content hash.
+# The source tree intentionally keeps {{APP_QVER}} placeholders, but container
+# builds must never serve them: versioned assets are cached as immutable and
+# the service worker uses the same value to retire stale caches.
+RUN set -eux; \
+    asset_version="$( \
+      find /var/www/public /var/www/src -type f -print0 \
+        | sort -z \
+        | xargs -0 sha256sum \
+        | sha256sum \
+        | cut -c1-16 \
+    )"; \
+    bash /var/www/scripts/stamp-assets.sh "v${asset_version}" /var/www
+
 #############################
 # Composer Stage – install PHP dependencies
 #############################

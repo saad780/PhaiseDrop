@@ -1,0 +1,79 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      TIMEZONE: America/Los_Angeles
+      DATE_TIME_FORMAT: m/d/y h:iA
+      TOTAL_UPLOAD_SIZE: 32M
+      SECURE: "true"
+      FR_PUBLISHED_URL: https://drop.phaise.com
+      PHAISE_DROP_AGENT_API_KEY: ${PHAISE_DROP_AGENT_API_KEY:-}
+      PUID: ${DROP_PUID:?Set DROP_PUID to the NAS dataset owner UID}
+      PGID: ${DROP_PGID:?Set DROP_PGID to the NAS dataset group GID}
+      CHOWN_ON_START: "false"
+      SCAN_ON_START: "false"
+      VIRUS_SCAN_ENABLED: "true"
+      VIRUS_SCAN_CMD: clamscan
+      CLAMAV_AUTO_UPDATE: "true"
+      FR_TRUSTED_PROXIES: "172.16.0.0/12"
+    volumes:
+      - /mnt/main/NAS/drop:/var/www/uploads
+      - phaise_drop_users:/var/www/users
+      - phaise_drop_metadata:/var/www/metadata
+      - phaise_drop_sessions:/var/www/sessions
+    ports:
+      - "127.0.0.1:18443:80"
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    networks:
+      - default
+
+  public-gateway:
+    build:
+      context: .
+      dockerfile: deploy/gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/healthz | grep -q '^ok$'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - default
+      - coolify
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.phaise-drop-public.rule=Host(`drop.phaise.com`)
+      - traefik.http.routers.phaise-drop-public.entrypoints=https
+      - traefik.http.routers.phaise-drop-public.tls=true
+      - traefik.http.routers.phaise-drop-public.middlewares=phaise-drop-public-headers
+      - traefik.http.middlewares.phaise-drop-public-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.phaise-drop-public-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.phaise-drop-public-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.phaise-drop-public-headers.headers.referrerPolicy=no-referrer
+      - traefik.http.services.phaise-drop-public.loadbalancer.server.port=8080
+
+volumes:
+  phaise_drop_users:
+  phaise_drop_metadata:
+  phaise_drop_sessions:
+
+networks:
+  coolify:
+    external: true
