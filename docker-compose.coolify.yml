@@ -10,6 +10,7 @@ services:
       TOTAL_UPLOAD_SIZE: 32M
       SECURE: "true"
       FR_PUBLISHED_URL: https://drop.phaise.com
+      PHAISE_DROP_AGENT_API_KEY: ${PHAISE_DROP_AGENT_API_KEY:-}
       PUID: ${DROP_PUID:?Set DROP_PUID to the NAS dataset owner UID}
       PGID: ${DROP_PGID:?Set DROP_PGID to the NAS dataset group GID}
       CHOWN_ON_START: "false"

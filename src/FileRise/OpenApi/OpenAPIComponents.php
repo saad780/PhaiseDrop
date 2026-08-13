@@ -38,6 +38,13 @@ use OpenApi\Annotations as OA;
  *     name="X-CSRF-Token",
  *     description="CSRF token header required for state-changing requests"
  *   ),
+ *   @OA\SecurityScheme(
+ *     securityScheme="agentBearerAuth",
+ *     type="http",
+ *     scheme="bearer",
+ *     bearerFormat="opaque",
+ *     description="Private Phaise Drop assistant API bearer token"
+ *   ),
  *
  *   @OA\Response(
  *     response="Unauthorized",

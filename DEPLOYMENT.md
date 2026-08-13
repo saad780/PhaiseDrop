@@ -12,6 +12,7 @@ This repository is a security-focused FileRise fork for one-way uploads to the N
 
 - `PERSISTENT_TOKENS_KEY` is intentionally not passed through Coolify's stack environment. On a pristine install FileRise generates it in the persistent metadata volume. Back up `metadata/persistent_tokens.key` with that volume.
 - `DROP_PUID` and `DROP_PGID`: numeric owner/group with write access to `/mnt/main/NAS/drop`. Confirm these against the TrueNAS ACL before first deployment.
+- `PHAISE_DROP_AGENT_API_KEY`: opaque bearer token for the private `/api/agent/v1/` share API. Leave unset to disable the API. Never expose these endpoints through the public gateway.
 
 The compose definition intentionally uses `CHOWN_ON_START=false`: startup leaves both the ownership and mode of the SMB dataset root untouched and never recursively rewrites its ACLs.
 
