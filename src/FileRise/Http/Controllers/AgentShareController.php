@@ -8,6 +8,14 @@ use FileRise\Domain\AgentShareService;
 
 final class AgentShareController
 {
+    public function createUpload(): void
+    {
+        self::requireMethod('POST');
+        self::requireBearer();
+        $result = AgentShareService::createUpload(self::input());
+        self::json($result, isset($result['error']) ? 400 : 201);
+    }
+
     public function create(): void
     {
         self::requireMethod('POST');

@@ -46,6 +46,13 @@ $failIf = static function (bool $condition, string $message) use (&$errors): voi
 };
 
 try {
+    $upload = \FileRise\Domain\AgentShareService::createUpload(['title' => 'Receive files']);
+    $failIf(($upload['type'] ?? '') !== 'upload', 'agent upload creation did not return upload type');
+    $failIf(isset($upload['id']) || isset($upload['folder']), 'agent upload response leaked token or path');
+    $failIf(!preg_match('/^[a-z]{4}$/', (string)($upload['code'] ?? '')), 'agent upload code missing');
+    $links = \FileRise\Domain\LinkModel::listActive();
+    $match = array_values(array_filter($links['links'], static fn($link) => ($link['code'] ?? '') === ($upload['code'] ?? '')));
+    $failIf(count($match) !== 1 || $match[0]['type'] !== 'upload', 'created link is not an upload destination');
     $created = \FileRise\Domain\AgentShareService::create([
         'title' => 'Delivery',
         'note' => 'Assistant-created snapshot.',

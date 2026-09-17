@@ -11,6 +11,18 @@ final class AgentShareService
 {
     private const CODE_PATTERN = '/^[a-z]{4}$/';
 
+    /** Create an upload-only destination without exposing its internal token. */
+    public static function createUpload(array $input): array
+    {
+        $result = LinkModel::createUpload($input, 'assistant-api');
+        if (isset($result['error'])) {
+            return ['error' => (string)$result['error']];
+        }
+        return array_intersect_key($result, array_flip([
+            'success', 'type', 'code', 'url', 'createdAt', 'expiresAt', 'idleTimeoutSeconds',
+        ]));
+    }
+
     /** @return array<string,mixed> */
     public static function create(array $input): array
     {
