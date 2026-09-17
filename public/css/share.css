@@ -85,6 +85,48 @@
   padding: 24px;
 }
 
+.fr-share-drop-instructions {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border-left: 4px solid var(--share-accent);
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.08);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.fr-share-drop-finish {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--share-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.fr-share-drop-complete {
+  margin-top: 20px;
+  padding: 20px;
+  border: 1px solid rgba(22, 163, 74, 0.35);
+  border-radius: 14px;
+  background: rgba(22, 163, 74, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fr-share-drop-complete[hidden] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .fr-share-drop-finish {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .fr-share-ai-launcher {
   margin-top: 18px;
   padding: 16px 18px;
@@ -820,6 +862,15 @@ body.fr-share-ai-modal-open {
   font-size: 0.95rem;
 }
 
+.fr-share-error {
+  margin: 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.45);
+  border-radius: 8px;
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
 .fr-share-alert {
   padding: 10px 12px;
   border-radius: 10px;
@@ -912,4 +963,67 @@ body.fr-share-ai-modal-open {
   .fr-share-preview video {
     max-height: 260px;
   }
+}
+
+/* Phaise Drop public request/share skin. */
+:root {
+  --share-accent: #6d5dfc;
+  --share-accent-dark: #5145cd;
+  --share-bg: #f4f6f8;
+  --share-surface: #ffffff;
+  --share-border: #e2e6eb;
+  --share-text: #111827;
+  --share-muted: #667085;
+  --share-shadow: 0 24px 70px rgba(16, 24, 40, .11);
+}
+
+.fr-share-body,
+:root[data-share-theme="light"] .fr-share-body {
+  background:
+    radial-gradient(760px 420px at 8% 0%, rgba(109,93,252,.13), transparent 64%),
+    radial-gradient(700px 400px at 100% 100%, rgba(11,154,120,.1), transparent 62%),
+    #f4f6f8;
+}
+.fr-share-shell { max-width: 940px; padding: 52px 20px 42px; }
+.fr-share-card { border-radius: 19px; }
+.fr-share-card-wide { padding: 28px; }
+.fr-share-card-header { gap: 18px; }
+.fr-share-logo { width: 46px; height: 46px; border-radius: 13px; }
+.fr-share-kicker { color: var(--share-accent); text-transform: uppercase; letter-spacing: .11em; font-weight: 800; font-size: 10px; }
+.fr-share-title { font-size: clamp(24px,4vw,34px); line-height: 1.1; letter-spacing: -.035em; font-weight: 750; }
+.fr-share-upload { box-shadow: none; border-color: var(--share-border); background: #fafbfc; margin-top: 24px; }
+.fr-share-upload-title { font-size: 18px; letter-spacing: -.02em; }
+.fr-share-upload-subtitle { color: var(--share-muted); }
+.fr-share-drop-instructions { border-left: 0; border: 1px solid #d9d4ff; background: #f2f0ff; color: #443a91; }
+.fr-share-dropzone { min-height: 275px; border: 2px dashed #bbb5ef; border-radius: 16px; background: #fff; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+.fr-share-dropzone:hover,.fr-share-dropzone.is-dragover { border-color: var(--share-accent); background: #f8f7ff; transform: translateY(-1px); }
+.fr-share-dropzone-title { font-size: 20px; letter-spacing: -.02em; }
+.fr-share-dropzone-subtitle { color: var(--share-muted); }
+.fr-share-btn { background: var(--share-accent); border-color: var(--share-accent); border-radius: 9px; min-height: 39px; font-weight: 650; box-shadow: 0 5px 13px rgba(109,93,252,.18); }
+.fr-share-btn:hover { background: var(--share-accent-dark); border-color: var(--share-accent-dark); }
+.fr-share-btn-ghost { background: #fff; color: #475467; border-color: var(--share-border); box-shadow: none; }
+.fr-share-btn-ghost:hover { background: #f5f6f8; color: #344054; border-color: #ccd1d8; }
+.fr-share-drop-finish { margin-top: 24px; padding: 20px; border: 1px solid #dfe3e8; border-radius: 12px; background: #fff; }
+.fr-share-drop-queue { margin-top: 16px; }
+.fr-share-footer { margin-top: 20px; letter-spacing: .02em; }
+
+@media (prefers-color-scheme: dark) {
+  .fr-share-body { background: radial-gradient(760px 420px at 8% 0%,rgba(109,93,252,.14),transparent 64%),#10141a; }
+  .fr-share-upload { background: #11161d; }
+  .fr-share-dropzone { background: #171c24; border-color: #504a76; }
+  .fr-share-dropzone:hover,.fr-share-dropzone.is-dragover { background: #1d1a31; }
+  .fr-share-btn-ghost,.fr-share-drop-finish { background: #171c24; border-color: var(--share-border); color: var(--share-text); }
+  .fr-share-drop-instructions { background: #24213d; border-color: #3d3763; color: #d9d5ff; }
+}
+:root[data-share-theme="dark"] .fr-share-body { background: radial-gradient(760px 420px at 8% 0%,rgba(109,93,252,.14),transparent 64%),#10141a; }
+:root[data-share-theme="dark"] .fr-share-upload { background: #11161d; }
+:root[data-share-theme="dark"] .fr-share-dropzone,
+:root[data-share-theme="dark"] .fr-share-drop-finish { background: #171c24; border-color: var(--share-border); }
+
+@media (max-width: 640px) {
+  .fr-share-shell { padding: 18px 10px 30px; }
+  .fr-share-card-wide { padding: 18px; }
+  .fr-share-card-header { align-items: flex-start; }
+  .fr-share-actions { margin-top: 8px; }
+  .fr-share-dropzone { min-height: 230px; padding: 24px 14px; }
 }

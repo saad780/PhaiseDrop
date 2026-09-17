@@ -4,6 +4,11 @@
   function getBasePathFromLocation() {
     try {
       let p = String(window.location.pathname || '');
+      const publicRoute = p.match(/^(.*)\/(?:[a-z]{4}|d\/(?:[a-z]{4}|[a-f0-9]{64}))\/?$/i);
+      if (publicRoute) {
+        const base = String(publicRoute[1] || '').replace(/\/+$/, '');
+        return base === '/' ? '' : base;
+      }
       p = p.replace(/\/api\/folder\/shareFolder\.php$/i, '');
       p = p.replace(/\/api\/file\/share\.php$/i, '');
       p = p.replace(/\/+$/, '');

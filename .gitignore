@@ -17,6 +17,7 @@
 /sessions/
 
 # Tooling caches
+/vendor/
 .phpunit.result.cache
 .phpcs-cache
 .php-cs-fixer.cache

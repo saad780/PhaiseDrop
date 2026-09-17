@@ -11,6 +11,164 @@
         }
     ],
     "paths": {
+        "/api/agent/v1/createShare.php": {
+            "post": {
+                "tags": [
+                    "Agent Shares"
+                ],
+                "summary": "Create an assistant file share",
+                "operationId": "agentCreateShare",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "title",
+                                    "items"
+                                ],
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "maxLength": 120
+                                    },
+                                    "note": {
+                                        "type": "string",
+                                        "maxLength": 1000
+                                    },
+                                    "pin": {
+                                        "type": "string",
+                                        "pattern": "^\\\\d{4,12}$"
+                                    },
+                                    "expiresInSeconds": {
+                                        "type": "integer",
+                                        "default": 172800,
+                                        "maximum": 2592000,
+                                        "minimum": 3600
+                                    },
+                                    "items": {
+                                        "type": "array",
+                                        "items": {
+                                            "required": [
+                                                "path",
+                                                "type"
+                                            ],
+                                            "properties": {
+                                                "path": {
+                                                    "type": "string",
+                                                    "example": "Assistant Shares/report.pdf"
+                                                },
+                                                "type": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "file",
+                                                        "folder"
+                                                    ]
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Share created without exposing its internal token"
+                    },
+                    "400": {
+                        "description": "Invalid or unsafe selection"
+                    },
+                    "401": {
+                        "description": "Invalid bearer token"
+                    },
+                    "503": {
+                        "description": "Agent API is not configured"
+                    }
+                },
+                "security": [
+                    {
+                        "agentBearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/agent/v1/listShares.php": {
+            "get": {
+                "tags": [
+                    "Agent Shares"
+                ],
+                "summary": "List active assistant-compatible shares",
+                "operationId": "agentListShares",
+                "responses": {
+                    "200": {
+                        "description": "Active outbound shares without internal tokens or paths"
+                    },
+                    "401": {
+                        "description": "Invalid bearer token"
+                    },
+                    "503": {
+                        "description": "Agent API is not configured"
+                    }
+                },
+                "security": [
+                    {
+                        "agentBearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/agent/v1/revokeShare.php": {
+            "post": {
+                "tags": [
+                    "Agent Shares"
+                ],
+                "summary": "Revoke an active assistant-compatible share",
+                "operationId": "agentRevokeShare",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "properties": {
+                                    "code": {
+                                        "type": "string",
+                                        "pattern": "^[a-z]{4}$"
+                                    },
+                                    "url": {
+                                        "type": "string",
+                                        "format": "uri"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Share revoked"
+                    },
+                    "401": {
+                        "description": "Invalid bearer token"
+                    },
+                    "404": {
+                        "description": "Active share not found"
+                    },
+                    "503": {
+                        "description": "Agent API is not configured"
+                    }
+                },
+                "security": [
+                    {
+                        "agentBearerAuth": []
+                    }
+                ]
+            }
+        },
         "/api/admin/acl/getGrants.php": {
             "get": {
                 "tags": [
@@ -7117,6 +7275,12 @@
                 "description": "CSRF token header required for state-changing requests",
                 "name": "X-CSRF-Token",
                 "in": "header"
+            },
+            "agentBearerAuth": {
+                "type": "http",
+                "description": "Private Phaise Drop assistant API bearer token",
+                "bearerFormat": "opaque",
+                "scheme": "bearer"
             }
         }
     },

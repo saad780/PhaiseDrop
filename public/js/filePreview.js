@@ -113,6 +113,11 @@ function attachVolumePersistence(el) {
 
 /* -------------------------------- Share modal (existing) -------------------------------- */
 export function openShareModal(file, folder) {
+  if (window.PhaiseDrop?.openShare) {
+    const base = folder && folder !== 'root' ? String(folder).replace(/^\/+|\/+$/g, '') + '/' : '';
+    window.PhaiseDrop.openShare([{ path: base + file.name, type: 'file', name: file.name }]);
+    return;
+  }
   const existing = document.getElementById("shareModal");
   if (existing) existing.remove();
 

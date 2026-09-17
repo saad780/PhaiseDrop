@@ -34,13 +34,12 @@ window.currentOIDCConfig = currentOIDCConfig;
 
 // Shared permissions cache across modules (populated once per tab)
 const PERMISSIONS_URL = '/api/profile/getUserPermissions.php';
-const DEFAULT_HEADER_TITLE = 'FileRise';
-const PRO_DEFAULT_HEADER_TITLE = 'FileRise Pro';
+const DEFAULT_HEADER_TITLE = 'Phaise Drop';
 
 function resolveHeaderTitle(rawTitle, isPro) {
   const cleaned = String(rawTitle || '').trim();
-  if (!cleaned || cleaned === DEFAULT_HEADER_TITLE) {
-    return isPro ? PRO_DEFAULT_HEADER_TITLE : DEFAULT_HEADER_TITLE;
+  if (!cleaned || /^FileRise(?: Pro)?$/i.test(cleaned)) {
+    return DEFAULT_HEADER_TITLE;
   }
   return cleaned;
 }
